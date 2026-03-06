@@ -1,0 +1,60 @@
+{
+  "name": "k-kinzal/ztd-query-sqlite",
+  "description": "SQLite platform support for ZTD Query",
+  "type": "library",
+  "license": "MIT",
+  "require": {
+    "php": "^8.1",
+    "k-kinzal/ztd-query-php": "@dev"
+  },
+  "require-dev": {
+    "friendsofphp/php-cs-fixer": "^3.92",
+    "k-kinzal/sql-faker": "@dev",
+    "nikic/php-fuzzer": "^0.0.11",
+    "phpstan/phpstan": "^2.1",
+    "phpstan/phpstan-strict-rules": "^2.0",
+    "phpunit/phpunit": "^10.5 || ^11 || ^12 || ^13",
+    "infection/infection": "^0.28 || ^0.29 || ^0.30 || ^0.31 || ^0.32",
+    "brianium/paratest": "^6.11 || ^7",
+    "phpbench/phpbench": "^1.4"
+  },
+  "autoload": {
+    "psr-4": {
+      "ZtdQuery\\Platform\\Sqlite\\": "src/"
+    }
+  },
+  "autoload-dev": {
+    "psr-4": {
+      "Tests\\": "tests/",
+      "Fuzz\\": "fuzz/"
+    }
+  },
+  "scripts": {
+    "bench": "@bench:quick",
+    "bench:quick": "phpbench run bench --bootstrap=vendor/autoload.php --report=aggregate --php-config='{\"memory_limit\":\"512M\"}' --warmup=1 --iterations=3 --revs=25",
+    "bench:full": "phpbench run bench --bootstrap=vendor/autoload.php --report=aggregate --php-config='{\"memory_limit\":\"512M\"}' --warmup=2 --iterations=8 --revs=100",
+    "test": "paratest --processes=auto",
+    "lint": [
+      "@format:check",
+      "phpstan analyse --memory-limit=512M"
+    ],
+    "format": "php-cs-fixer fix --allow-risky=yes",
+    "format:check": "php-cs-fixer fix --dry-run --diff --allow-risky=yes",
+    "fuzz": [
+      "@fuzz:robustness",
+      "@fuzz:robustness:classify",
+      "@fuzz:robustness:rewrite"
+    ],
+    "fuzz:robustness": "php-fuzzer fuzz fuzz/fuzz_robustness.php fuzz/corpus/robustness/",
+    "fuzz:robustness:classify": "php-fuzzer fuzz fuzz/fuzz_robustness_classify.php fuzz/corpus/robustness-classify/",
+    "fuzz:robustness:rewrite": "php-fuzzer fuzz fuzz/fuzz_robustness_rewrite.php fuzz/corpus/robustness-rewrite/",
+    "infection": "infection --threads=max --show-mutations --no-progress",
+    "test:unit": "phpunit tests/Unit/",
+    "test:fuzz": "phpunit fuzz/"
+  },
+  "config": {
+    "allow-plugins": {
+      "infection/extension-installer": true
+    }
+  }
+}

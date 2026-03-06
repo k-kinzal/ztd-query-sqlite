@@ -1,0 +1,23 @@
+// NOTE: You do not have permission to overwrite this file. Please ask a human operator to perform the changes for you.
+{
+    "$schema": "vendor/infection/infection/resources/schema.json",
+    "timeout": 25,
+    "source": {
+        "directories": ["src"]
+    },
+    "logs": {
+        "text": "build/infection/infection.log",
+        "summary": "build/infection/summary.log",
+        "github": true
+    },
+    "mutators": {
+        "@default": true
+    },
+    "minMsi": 75,
+    "minCoveredMsi": 85,
+    "phpUnit": {
+        "configDir": ".",
+        "customPath": "vendor/bin/phpunit"
+    },
+    "testFrameworkOptions": "--testsuite=unit"
+}

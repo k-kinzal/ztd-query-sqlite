@@ -11,6 +11,7 @@ use ZtdQuery\Exception\UnsupportedSqlException;
 use ZtdQuery\Platform\Sqlite\SqliteCastRenderer;
 use ZtdQuery\Platform\Sqlite\SqliteIdentifierQuoter;
 use ZtdQuery\Platform\Sqlite\SqliteMutationResolver;
+use ZtdQuery\Platform\Sqlite\SqliteLexicalMasker;
 use ZtdQuery\Platform\Sqlite\SqliteParser;
 use ZtdQuery\Platform\Sqlite\SqliteQueryGuard;
 use ZtdQuery\Platform\Sqlite\SqliteRewriter;
@@ -35,6 +36,7 @@ use ZtdQuery\Rewrite\SqlRewriter;
 use ZtdQuery\Shadow\ShadowStore;
 
 #[CoversClass(SqliteRewriter::class)]
+#[UsesClass(SqliteLexicalMasker::class)]
 #[UsesClass(SqliteParser::class)]
 #[UsesClass(SqliteQueryGuard::class)]
 #[UsesClass(SqliteSchemaParser::class)]
@@ -1472,6 +1474,75 @@ final class SqliteRewriterTest extends RewriterContractTest
 
         $plan = $rewriter->rewrite('/* comment */ DELETE FROM users');
         self::assertSame('SELECT 1 WHERE 0', $plan->sql());
+    }
+
+    public function testSelectRewritesTableAfterBlockComment(): void
+    {
+        $registry = new TableDefinitionRegistry();
+        $registry->register('users', new TableDefinition(['id'], ['id' => 'INTEGER'], ['id'], [], []));
+        $store = new ShadowStore();
+        $store->set('users', [['id' => 1]]);
+        $rewriter = $this->createRewriter($store, $registry);
+
+        $plan = $rewriter->rewrite('SELECT * FROM/* table */users');
+
+        self::assertSame(QueryKind::READ, $plan->kind());
+        self::assertStringContainsString('"users" AS', $plan->sql());
+    }
+
+    public function testSelectIgnoresSqlKeywordsInsideLeadingLineComment(): void
+    {
+        $registry = new TableDefinitionRegistry();
+        $registry->register('users', new TableDefinition(['id'], ['id' => 'INTEGER'], ['id'], [], []));
+        $store = new ShadowStore();
+        $store->set('users', [['id' => 1]]);
+        $rewriter = $this->createRewriter($store, $registry);
+        $sql = "-- SELECT * FROM other_table WHERE DELETE UPDATE INSERT\nSELECT * FROM users";
+
+        $plan = $rewriter->rewrite($sql);
+
+        self::assertSame(QueryKind::READ, $plan->kind());
+        self::assertStringContainsString('"users" AS', $plan->sql());
+        self::assertStringNotContainsString('"other_table" AS', $plan->sql());
+    }
+
+    public function testInsertResolvesTargetAfterBlockComment(): void
+    {
+        $registry = new TableDefinitionRegistry();
+        $registry->register('users', new TableDefinition(['id'], ['id' => 'INTEGER'], ['id'], [], []));
+        $rewriter = $this->createRewriter(new ShadowStore(), $registry);
+
+        $plan = $rewriter->rewrite('INSERT INTO/* table */users (id) VALUES (1)');
+
+        self::assertSame(QueryKind::WRITE_SIMULATED, $plan->kind());
+        self::assertInstanceOf(InsertMutation::class, $plan->mutation());
+        self::assertSame('users', $plan->mutation()->tableName());
+    }
+
+    public function testUpdateResolvesTargetAfterBlockComment(): void
+    {
+        $registry = new TableDefinitionRegistry();
+        $registry->register('users', new TableDefinition(['id'], ['id' => 'INTEGER'], ['id'], [], []));
+        $rewriter = $this->createRewriter(new ShadowStore(), $registry);
+
+        $plan = $rewriter->rewrite('UPDATE/* table */users SET id = 2 WHERE id = 1');
+
+        self::assertSame(QueryKind::WRITE_SIMULATED, $plan->kind());
+        self::assertInstanceOf(UpdateMutation::class, $plan->mutation());
+        self::assertSame('users', $plan->mutation()->tableName());
+    }
+
+    public function testDeleteResolvesTargetAfterBlockComment(): void
+    {
+        $registry = new TableDefinitionRegistry();
+        $registry->register('users', new TableDefinition(['id'], ['id' => 'INTEGER'], ['id'], [], []));
+        $rewriter = $this->createRewriter(new ShadowStore(), $registry);
+
+        $plan = $rewriter->rewrite('DELETE FROM/* table */users WHERE id = 1');
+
+        self::assertSame(QueryKind::WRITE_SIMULATED, $plan->kind());
+        self::assertInstanceOf(DeleteMutation::class, $plan->mutation());
+        self::assertSame('users', $plan->mutation()->tableName());
     }
 
     public function testUpdateEnsuresShadowStoreEntry(): void

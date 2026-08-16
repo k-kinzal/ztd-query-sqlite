@@ -10,6 +10,7 @@ use PHPUnit\Framework\TestCase;
 use ZtdQuery\Exception\UnknownSchemaException;
 use ZtdQuery\Exception\UnsupportedSqlException;
 use ZtdQuery\Platform\Sqlite\SqliteMutationResolver;
+use ZtdQuery\Platform\Sqlite\SqliteLexicalMasker;
 use ZtdQuery\Platform\Sqlite\SqliteParser;
 use ZtdQuery\Platform\Sqlite\SqliteSchemaParser;
 use ZtdQuery\Rewrite\QueryKind;
@@ -25,6 +26,7 @@ use ZtdQuery\Shadow\Mutation\UpsertMutation;
 use ZtdQuery\Shadow\ShadowStore;
 
 #[CoversClass(SqliteMutationResolver::class)]
+#[UsesClass(SqliteLexicalMasker::class)]
 #[UsesClass(SqliteParser::class)]
 #[UsesClass(SqliteSchemaParser::class)]
 final class SqliteMutationResolverTest extends TestCase

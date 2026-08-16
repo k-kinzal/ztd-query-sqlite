@@ -6,6 +6,7 @@ namespace ZtdQuery\Platform\Sqlite\Transformer;
 
 use ZtdQuery\Platform\Sqlite\SqliteCastRenderer;
 use ZtdQuery\Platform\Sqlite\SqliteIdentifierQuoter;
+use ZtdQuery\Platform\Sqlite\SqliteParser;
 use ZtdQuery\Platform\CastRenderer;
 use ZtdQuery\Platform\IdentifierQuoter;
 use ZtdQuery\Rewrite\SqlTransformer;
@@ -22,11 +23,13 @@ final class SelectTransformer implements SqlTransformer
 {
     private CastRenderer $castRenderer;
     private IdentifierQuoter $quoter;
+    private SqliteParser $parser;
 
     public function __construct(?CastRenderer $castRenderer = null, ?IdentifierQuoter $quoter = null)
     {
         $this->castRenderer = $castRenderer ?? new SqliteCastRenderer();
         $this->quoter = $quoter ?? new SqliteIdentifierQuoter();
+        $this->parser = new SqliteParser();
     }
 
     /**
@@ -34,9 +37,10 @@ final class SelectTransformer implements SqlTransformer
      */
     public function transform(string $sql, array $tables): string
     {
+        $searchableSql = $this->parser->maskStringLiterals($this->parser->stripComments($sql));
         $ctes = [];
         foreach ($tables as $tableName => $tableContext) {
-            if (stripos($sql, $tableName) === false) {
+            if (stripos($searchableSql, $tableName) === false) {
                 continue;
             }
 

@@ -7,11 +7,13 @@ namespace Tests\Unit;
 use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\Attributes\UsesClass;
 use Tests\Contract\QueryClassifierContractTest;
+use ZtdQuery\Platform\Sqlite\SqliteLexicalMasker;
 use ZtdQuery\Platform\Sqlite\SqliteParser;
 use ZtdQuery\Platform\Sqlite\SqliteQueryGuard;
 use ZtdQuery\Rewrite\QueryKind;
 
 #[CoversClass(SqliteQueryGuard::class)]
+#[UsesClass(SqliteLexicalMasker::class)]
 #[UsesClass(SqliteParser::class)]
 final class SqliteQueryGuardTest extends QueryClassifierContractTest
 {

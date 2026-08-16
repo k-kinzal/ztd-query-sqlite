@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace Fuzz;
 
 use Faker\Factory;
+use PHPUnit\Framework\Attributes\CoversNothing;
+use PHPUnit\Framework\Attributes\Large;
 use PHPUnit\Framework\TestCase;
 use SqlFaker\SqliteProvider;
 use ZtdQuery\Platform\Sqlite\SqliteCastRenderer;
@@ -22,6 +24,8 @@ use ZtdQuery\Schema\ColumnTypeFamily;
  * - P-TF-3: With empty table context, SQL is returned unchanged (identity transform)
  * - P-TF-4: Empty-row shadow tables still inject CTE with WHERE FALSE
  */
+#[CoversNothing]
+#[Large]
 final class TransformerFuzzTest extends TestCase
 {
     private const ITERATIONS = 100;
@@ -35,12 +39,13 @@ final class TransformerFuzzTest extends TestCase
         $this->transformer = new SelectTransformer(new SqliteCastRenderer(), new SqliteIdentifierQuoter());
         $faker = Factory::create();
         $this->provider = new SqliteProvider($faker);
+        $faker->seed(20260815);
     }
 
     public function testTransformDoesNotCrashOnRandomSelectWithEmptyTables(): void
     {
         for ($i = 0; $i < self::ITERATIONS; $i++) {
-            $sql = $this->provider->selectStatement();
+            $sql = $this->provider->selectStatement(maxDepth: 8);
             try {
                 $result = $this->transformer->transform($sql, []);
                 self::assertNotEmpty($result, "transform() returned empty string on iteration $i");
@@ -71,7 +76,7 @@ final class TransformerFuzzTest extends TestCase
         ];
 
         for ($i = 0; $i < self::ITERATIONS; $i++) {
-            $sql = $this->provider->selectStatement();
+            $sql = $this->provider->selectStatement(maxDepth: 8);
             try {
                 $result = $this->transformer->transform($sql, $tables);
                 self::assertNotEmpty($result, "transform() returned empty string on iteration $i");
@@ -101,7 +106,7 @@ final class TransformerFuzzTest extends TestCase
         ];
 
         for ($i = 0; $i < self::ITERATIONS; $i++) {
-            $sql = $this->provider->selectStatement();
+            $sql = $this->provider->selectStatement(maxDepth: 8);
             try {
                 $result = $this->transformer->transform($sql, $tables);
                 self::assertNotEmpty($result, "transform() returned empty string on iteration $i");

@@ -8,11 +8,13 @@ use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\Attributes\UsesClass;
 use Tests\Contract\SchemaParserContractTest;
 use ZtdQuery\Platform\SchemaParser;
+use ZtdQuery\Platform\Sqlite\SqliteLexicalMasker;
 use ZtdQuery\Platform\Sqlite\SqliteParser;
 use ZtdQuery\Platform\Sqlite\SqliteSchemaParser;
 use ZtdQuery\Schema\ColumnTypeFamily;
 
 #[CoversClass(SqliteSchemaParser::class)]
+#[UsesClass(SqliteLexicalMasker::class)]
 #[UsesClass(SqliteParser::class)]
 final class SqliteSchemaParserTest extends SchemaParserContractTest
 {
@@ -1902,5 +1904,18 @@ final class SqliteSchemaParserTest extends SchemaParserContractTest
         self::assertSame(['col one', 'col two'], $result->columns);
         self::assertSame('TEXT', $result->columnTypes['col one']);
         self::assertSame('INTEGER', $result->columnTypes['col two']);
+    }
+
+    public function testConstraintKeywordPrefixesRemainColumnNames(): void
+    {
+        $parser = new SqliteSchemaParser();
+        $sql = 'CREATE TABLE bookings (id INT, check_in TEXT, checkout_date TEXT, unique_value TEXT, constraint_name TEXT, foreign_key_id INT)';
+        $result = $parser->parse($sql);
+
+        self::assertNotNull($result);
+        self::assertSame(
+            ['id', 'check_in', 'checkout_date', 'unique_value', 'constraint_name', 'foreign_key_id'],
+            $result->columns,
+        );
     }
 }

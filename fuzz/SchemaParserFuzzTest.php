@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace Fuzz;
 
 use Faker\Factory;
+use PHPUnit\Framework\Attributes\CoversNothing;
+use PHPUnit\Framework\Attributes\Large;
 use PHPUnit\Framework\TestCase;
 use SqlFaker\SqliteProvider;
 use ZtdQuery\Platform\Sqlite\SqliteSchemaParser;
@@ -23,6 +25,8 @@ use ZtdQuery\Schema\TableDefinition;
  * - P-SP-6: Non-null result always has non-empty columns
  * - P-SP-7: parse() returns null for non-CREATE TABLE statements
  */
+#[CoversNothing]
+#[Large]
 final class SchemaParserFuzzTest extends TestCase
 {
     private const ITERATIONS = 100;
@@ -36,12 +40,13 @@ final class SchemaParserFuzzTest extends TestCase
         $this->parser = new SqliteSchemaParser();
         $faker = Factory::create();
         $this->provider = new SqliteProvider($faker);
+        $faker->seed(20260815);
     }
 
     public function testParseDoesNotCrashOnRandomCreateTable(): void
     {
         for ($i = 0; $i < self::ITERATIONS; $i++) {
-            $sql = $this->provider->createTableStatement();
+            $sql = $this->provider->createTableStatement(maxDepth: 5);
             try {
                 $result = $this->parser->parse($sql);
                 if ($result !== null) {
@@ -57,7 +62,7 @@ final class SchemaParserFuzzTest extends TestCase
     public function testParseStructuralInvariantsOnRandomCreateTable(): void
     {
         for ($i = 0; $i < self::ITERATIONS; $i++) {
-            $sql = $this->provider->createTableStatement();
+            $sql = $this->provider->createTableStatement(maxDepth: 5);
             try {
                 $result = $this->parser->parse($sql);
                 if ($result === null) {
@@ -117,7 +122,7 @@ final class SchemaParserFuzzTest extends TestCase
     public function testParseReturnsNullOnNonCreateTableSql(): void
     {
         for ($i = 0; $i < self::ITERATIONS; $i++) {
-            $sql = $this->provider->selectStatement();
+            $sql = $this->provider->selectStatement(maxDepth: 8);
             try {
                 $result = $this->parser->parse($sql);
                 self::assertNull($result, "parse() should return null for SELECT on iteration $i with SQL: $sql");

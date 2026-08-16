@@ -11,6 +11,7 @@ use ZtdQuery\Connection\StatementInterface;
 use ZtdQuery\Platform\Sqlite\SqliteCastRenderer;
 use ZtdQuery\Platform\Sqlite\SqliteIdentifierQuoter;
 use ZtdQuery\Platform\Sqlite\SqliteMutationResolver;
+use ZtdQuery\Platform\Sqlite\SqliteLexicalMasker;
 use ZtdQuery\Platform\Sqlite\SqliteParser;
 use ZtdQuery\Platform\Sqlite\SqliteQueryGuard;
 use ZtdQuery\Platform\Sqlite\SqliteRewriter;
@@ -29,6 +30,7 @@ use PHPUnit\Framework\Attributes\UsesClass;
 #[CoversClass(SqliteSessionFactory::class)]
 #[UsesClass(SqliteCastRenderer::class)]
 #[UsesClass(SqliteIdentifierQuoter::class)]
+#[UsesClass(SqliteLexicalMasker::class)]
 #[UsesClass(SqliteMutationResolver::class)]
 #[UsesClass(SqliteParser::class)]
 #[UsesClass(SqliteQueryGuard::class)]

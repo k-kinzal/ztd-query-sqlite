@@ -6,6 +6,7 @@ namespace Tests\Unit\Transformer;
 
 use PHPUnit\Framework\TestCase;
 use ZtdQuery\Exception\UnsupportedSqlException;
+use ZtdQuery\Platform\Sqlite\SqliteLexicalMasker;
 use ZtdQuery\Platform\Sqlite\SqliteParser;
 use ZtdQuery\Platform\Sqlite\Transformer\DeleteTransformer;
 use ZtdQuery\Platform\Sqlite\Transformer\InsertTransformer;
@@ -18,6 +19,7 @@ use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\Attributes\UsesClass;
 
 #[CoversClass(SqliteTransformer::class)]
+#[UsesClass(SqliteLexicalMasker::class)]
 #[UsesClass(SqliteParser::class)]
 #[UsesClass(DeleteTransformer::class)]
 #[UsesClass(InsertTransformer::class)]

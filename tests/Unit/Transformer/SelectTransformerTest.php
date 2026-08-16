@@ -11,6 +11,8 @@ use ZtdQuery\Platform\CastRenderer;
 use ZtdQuery\Platform\IdentifierQuoter;
 use ZtdQuery\Platform\Sqlite\SqliteCastRenderer;
 use ZtdQuery\Platform\Sqlite\SqliteIdentifierQuoter;
+use ZtdQuery\Platform\Sqlite\SqliteLexicalMasker;
+use ZtdQuery\Platform\Sqlite\SqliteParser;
 use ZtdQuery\Platform\Sqlite\Transformer\SelectTransformer;
 use ZtdQuery\Rewrite\SqlTransformer;
 use ZtdQuery\Schema\ColumnType;
@@ -19,6 +21,8 @@ use ZtdQuery\Schema\ColumnTypeFamily;
 #[CoversClass(SelectTransformer::class)]
 #[UsesClass(SqliteCastRenderer::class)]
 #[UsesClass(SqliteIdentifierQuoter::class)]
+#[UsesClass(SqliteLexicalMasker::class)]
+#[UsesClass(SqliteParser::class)]
 final class SelectTransformerTest extends TransformerContractTest
 {
     protected function createTransformer(): SqlTransformer
@@ -112,6 +116,29 @@ final class SelectTransformerTest extends TransformerContractTest
 
         self::assertStringContainsString('"users"', $result);
         self::assertStringNotContainsString('"orders"', $result);
+    }
+
+    public function testTransformSkipsTableMentionedOnlyInsideStringLiteral(): void
+    {
+        $transformer = new SelectTransformer();
+        $tables = [
+            'items' => [
+                'rows' => [['id' => 1]],
+                'columns' => ['id'],
+                'columnTypes' => [],
+            ],
+            'users' => [
+                'rows' => [['id' => 2]],
+                'columns' => ['id'],
+                'columnTypes' => [],
+            ],
+        ];
+
+        $result = $transformer->transform("SELECT id, 'FROM items' AS label FROM users", $tables);
+
+        self::assertStringContainsString('"users" AS', $result);
+        self::assertStringNotContainsString('"items" AS', $result);
+        self::assertStringContainsString("'FROM items' AS label", $result);
     }
 
     public function testTransformWithExistingCte(): void

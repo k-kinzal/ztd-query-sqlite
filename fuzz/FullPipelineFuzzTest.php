@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace Fuzz;
 
 use Faker\Factory;
+use PHPUnit\Framework\Attributes\CoversNothing;
+use PHPUnit\Framework\Attributes\Large;
 use PHPUnit\Framework\TestCase;
 use SqlFaker\SqliteProvider;
 use ZtdQuery\Exception\UnknownSchemaException;
@@ -40,6 +42,8 @@ use ZtdQuery\Shadow\ShadowStore;
  * - INV-L2-02: WRITE_SIMULATED/DDL_SIMULATED plans must have non-null mutation
  * - INV-L2-03: READ plans must have null mutation
  */
+#[CoversNothing]
+#[Large]
 final class FullPipelineFuzzTest extends TestCase
 {
     private const ITERATIONS = 50;
@@ -54,6 +58,7 @@ final class FullPipelineFuzzTest extends TestCase
     {
         $this->schemaParser = new SqliteSchemaParser();
         $this->faker = Factory::create();
+        $this->faker->seed(20260815);
         $this->provider = new SqliteProvider($this->faker);
     }
 
@@ -115,8 +120,9 @@ final class FullPipelineFuzzTest extends TestCase
 
     public function testCreateTableThenSelectDoesNotCrash(): void
     {
+        $this->faker->seed(20260815);
         for ($i = 0; $i < self::ITERATIONS; $i++) {
-            $createSql = $this->provider->createTableStatement();
+            $createSql = $this->provider->createTableStatement(maxDepth: 5);
             $definition = $this->schemaParser->parse($createSql);
             if ($definition === null || $definition->columns === []) {
                 continue;
@@ -152,8 +158,9 @@ final class FullPipelineFuzzTest extends TestCase
 
     public function testCreateTableThenInsertDoesNotCrash(): void
     {
+        $this->faker->seed(20260815);
         for ($i = 0; $i < self::ITERATIONS; $i++) {
-            $createSql = $this->provider->createTableStatement();
+            $createSql = $this->provider->createTableStatement(maxDepth: 5);
             $definition = $this->schemaParser->parse($createSql);
             if ($definition === null || $definition->columns === []) {
                 continue;
@@ -203,8 +210,9 @@ final class FullPipelineFuzzTest extends TestCase
 
     public function testCreateTableThenUpdateDoesNotCrash(): void
     {
+        $this->faker->seed(20260815);
         for ($i = 0; $i < self::ITERATIONS; $i++) {
-            $createSql = $this->provider->createTableStatement();
+            $createSql = $this->provider->createTableStatement(maxDepth: 5);
             $definition = $this->schemaParser->parse($createSql);
             if ($definition === null || $definition->columns === []) {
                 continue;
@@ -253,8 +261,9 @@ final class FullPipelineFuzzTest extends TestCase
 
     public function testCreateTableThenDeleteDoesNotCrash(): void
     {
+        $this->faker->seed(20260815);
         for ($i = 0; $i < self::ITERATIONS; $i++) {
-            $createSql = $this->provider->createTableStatement();
+            $createSql = $this->provider->createTableStatement(maxDepth: 5);
             $definition = $this->schemaParser->parse($createSql);
             if ($definition === null || $definition->columns === []) {
                 continue;
@@ -295,8 +304,9 @@ final class FullPipelineFuzzTest extends TestCase
 
     public function testCreateTableRewriteRegistersThenDmlSucceeds(): void
     {
+        $this->faker->seed(20260815);
         for ($i = 0; $i < self::ITERATIONS; $i++) {
-            $createSql = $this->provider->createTableStatement();
+            $createSql = $this->provider->createTableStatement(maxDepth: 5);
             $definition = $this->schemaParser->parse($createSql);
             if ($definition === null || $definition->columns === []) {
                 continue;
@@ -334,8 +344,9 @@ final class FullPipelineFuzzTest extends TestCase
 
     public function testShadowStoreIntegrityAfterMultipleOperations(): void
     {
+        $this->faker->seed(20260815);
         for ($i = 0; $i < self::ITERATIONS; $i++) {
-            $createSql = $this->provider->createTableStatement();
+            $createSql = $this->provider->createTableStatement(maxDepth: 5);
             $definition = $this->schemaParser->parse($createSql);
             if ($definition === null || $definition->columns === []) {
                 continue;

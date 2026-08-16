@@ -7,7 +7,7 @@ namespace ZtdQuery\Platform\Sqlite;
 /**
  * Lightweight SQL parser for SQLite.
  *
- * Uses regex-based parsing focused on the SQL subset needed by ZTD:
+ * Uses lexical statement classification and focused extraction for the SQL subset needed by ZTD:
  * SELECT, INSERT, UPDATE, DELETE, CREATE TABLE, DROP TABLE, ALTER TABLE ADD COLUMN.
  *
  * Returns structured representations of parsed statements.
@@ -22,48 +22,51 @@ final class SqliteParser
      */
     public function classifyStatement(string $sql): ?string
     {
-        $trimmed = $this->stripComments($sql);
-        $trimmed = ltrim($trimmed);
-
-        if ($trimmed === '') {
+        $keywords = $this->scanTopLevelKeywords($sql);
+        if ($keywords === []) {
             return null;
         }
 
-        $upper = strtoupper($trimmed);
+        $first = $keywords[0]['keyword'];
+        $result = null;
+        if ($first === 'WITH') {
+            foreach ($keywords as $token) {
+                if (!$token['afterGroup']) {
+                    continue;
+                }
 
-        if (str_starts_with($upper, 'WITH')) {
-            return $this->classifyWithStatement($trimmed);
+                $result = match ($token['keyword']) {
+                    'SELECT' => 'SELECT',
+                    'INSERT', 'REPLACE' => 'INSERT',
+                    'UPDATE' => 'UPDATE',
+                    'DELETE' => 'DELETE',
+                    default => null,
+                };
+
+                if ($result !== null) {
+                    break;
+                }
+            }
+        } else {
+            $second = $keywords[1]['keyword'] ?? null;
+            $third = $keywords[2]['keyword'] ?? null;
+            $result = match ($first) {
+                'SELECT' => 'SELECT',
+                'INSERT', 'REPLACE' => 'INSERT',
+                'UPDATE' => 'UPDATE',
+                'DELETE' => 'DELETE',
+                'CREATE' => match ($second) {
+                    'TABLE' => 'CREATE_TABLE',
+                    'TEMPORARY' => $third === 'TABLE' ? 'CREATE_TABLE' : null,
+                    default => null,
+                },
+                'DROP' => $second === 'TABLE' ? 'DROP_TABLE' : null,
+                'ALTER' => $second === 'TABLE' ? 'ALTER_TABLE' : null,
+                default => null,
+            };
         }
 
-        if (str_starts_with($upper, 'SELECT')) {
-            return 'SELECT';
-        }
-
-        if (str_starts_with($upper, 'INSERT') || str_starts_with($upper, 'REPLACE')) {
-            return 'INSERT';
-        }
-
-        if (str_starts_with($upper, 'UPDATE')) {
-            return 'UPDATE';
-        }
-
-        if (str_starts_with($upper, 'DELETE')) {
-            return 'DELETE';
-        }
-
-        if (preg_match('/^CREATE\s+(TEMPORARY\s+)?TABLE\b/i', $trimmed) === 1) {
-            return 'CREATE_TABLE';
-        }
-
-        if (preg_match('/^DROP\s+TABLE\b/i', $trimmed) === 1) {
-            return 'DROP_TABLE';
-        }
-
-        if (preg_match('/^ALTER\s+TABLE\b/i', $trimmed) === 1) {
-            return 'ALTER_TABLE';
-        }
-
-        return null;
+        return $result;
     }
 
     /**
@@ -203,6 +206,8 @@ final class SqliteParser
      */
     public function extractSelectTables(string $sql): array
     {
+        $sql = $this->stripComments($sql);
+        $sql = $this->maskStringLiterals($sql);
         $tables = [];
 
         if (preg_match('/\bFROM\s+(.+?)(?:\s+WHERE\b|\s+GROUP\s+BY\b|\s+HAVING\b|\s+ORDER\s+BY\b|\s+LIMIT\b|\s+UNION\b|$)/is', $sql, $matches) === 1) {
@@ -238,6 +243,7 @@ final class SqliteParser
      */
     public function extractInsertColumns(string $sql): array
     {
+        $sql = $this->stripComments($sql);
         if (preg_match('/\bINTO\s+(?:"(?:[^"]|"")*"|[^\s(]+)\s*\(([^)]+)\)\s*(?:VALUES|SELECT)/i', $sql, $matches) === 1) {
             return $this->parseColumnList($matches[1]);
         }
@@ -252,13 +258,16 @@ final class SqliteParser
      */
     public function extractInsertValues(string $sql): array
     {
-        $upper = strtoupper($sql);
-        $valuesPos = strpos($upper, 'VALUES');
-        if ($valuesPos === false) {
+        $sql = $this->stripComments($sql);
+        $source = $this->findInsertSourceClause($sql);
+        if ($source === null) {
+            return [];
+        }
+        if ($source['keyword'] !== 'VALUES') {
             return [];
         }
 
-        $rest = substr($sql, $valuesPos + 6);
+        $rest = substr($sql, $source['offset'] + strlen($source['keyword']));
 
         return $this->parseValueSets($rest);
     }
@@ -270,6 +279,7 @@ final class SqliteParser
      */
     public function extractUpdateAssignments(string $sql): array
     {
+        $sql = $this->stripComments($sql);
         if (preg_match('/\bSET\s+(.+?)(?:\s+WHERE\b|\s+ORDER\s+BY\b|\s+LIMIT\b|$)/is', $sql, $matches) !== 1) {
             return [];
         }
@@ -282,6 +292,7 @@ final class SqliteParser
      */
     public function extractWhereClause(string $sql): ?string
     {
+        $sql = $this->stripComments($sql);
         if (preg_match('/\bWHERE\s+(.+?)(?:\s+ORDER\s+BY\b|\s+LIMIT\b|\s+GROUP\s+BY\b|\s+HAVING\b|$)/is', $sql, $matches) === 1) {
             return trim($matches[1]);
         }
@@ -294,6 +305,7 @@ final class SqliteParser
      */
     public function extractOrderByClause(string $sql): ?string
     {
+        $sql = $this->stripComments($sql);
         if (preg_match('/\bORDER\s+BY\s+(.+?)(?:\s+LIMIT\b|$)/is', $sql, $matches) === 1) {
             return trim($matches[1]);
         }
@@ -306,6 +318,7 @@ final class SqliteParser
      */
     public function extractLimitClause(string $sql): ?string
     {
+        $sql = $this->stripComments($sql);
         if (preg_match('/\bLIMIT\s+(.+?)$/is', $sql, $matches) === 1) {
             return trim($matches[1]);
         }
@@ -318,6 +331,7 @@ final class SqliteParser
      */
     public function hasOnConflict(string $sql): bool
     {
+        $sql = $this->stripComments($sql);
         return preg_match('/\bON\s+CONFLICT\b/i', $sql) === 1;
     }
 
@@ -350,6 +364,7 @@ final class SqliteParser
      */
     public function extractOnConflictUpdates(string $sql): array
     {
+        $sql = $this->stripComments($sql);
         if (preg_match('/\bON\s+CONFLICT\s*(?:\([^)]*\))?\s*DO\s+UPDATE\s+SET\s+(.+?)$/is', $sql, $matches) !== 1) {
             return [];
         }
@@ -362,8 +377,10 @@ final class SqliteParser
      */
     public function hasInsertSelect(string $sql): bool
     {
-        $upper = strtoupper($sql);
-        return preg_match('/\bINTO\s+(?:"(?:[^"]|"")*"|[^\s(]+)\s*(?:\([^)]*\)\s*)?SELECT\b/i', $sql) === 1;
+        $sql = $this->stripComments($sql);
+        $source = $this->findInsertSourceClause($sql);
+
+        return $source !== null && $source['keyword'] === 'SELECT';
     }
 
     /**
@@ -371,8 +388,10 @@ final class SqliteParser
      */
     public function extractInsertSelect(string $sql): ?string
     {
-        if (preg_match('/\bINTO\s+(?:"(?:[^"]|"")*"|[^\s(]+)\s*(?:\([^)]*\)\s*)?(SELECT\b.+)$/is', $sql, $matches) === 1) {
-            return trim($matches[1]);
+        $sql = $this->stripComments($sql);
+        $source = $this->findInsertSourceClause($sql);
+        if ($source !== null && $source['keyword'] === 'SELECT') {
+            return substr($sql, $source['offset']);
         }
 
         return null;
@@ -383,11 +402,40 @@ final class SqliteParser
      */
     public function stripComments(string $sql): string
     {
-        $result = (string) preg_replace('/\/\*.*?\*\//s', '', $sql);
-        $result = (string) preg_replace('/--[^\n]*/', '', $result);
-        $result = (string) preg_replace('/#[^\n]*/', '', $result);
+        return trim(SqliteLexicalMasker::maskComments($sql));
+    }
 
-        return trim($result);
+    public function maskStringLiterals(string $sql): string
+    {
+        $result = '';
+        $length = strlen($sql);
+        $i = 0;
+
+        while ($i < $length) {
+            if ($sql[$i] !== '\'') {
+                $result .= $sql[$i++];
+                continue;
+            }
+
+            $start = $i++;
+            while (true) {
+                $end = strpos($sql, '\'', $i);
+                if ($end === false) {
+                    $i = $length;
+                    break;
+                }
+                $i = $end;
+                if (str_starts_with(substr($sql, $i), "''")) {
+                    $i += 2;
+                    continue;
+                }
+                $i++;
+                break;
+            }
+            $result .= str_repeat(' ', $i - $start);
+        }
+
+        return $result;
     }
 
     /**
@@ -416,75 +464,112 @@ final class SqliteParser
         return $trimmed;
     }
 
-    private function classifyWithStatement(string $sql): ?string
+    /**
+     * @return array<int, array{keyword: string, afterGroup: bool, offset: int}>
+     */
+    private function scanTopLevelKeywords(string $sql): array
     {
-        $upper = strtoupper($sql);
-        $len = strlen($upper);
+        $keywords = [];
+        $len = strlen($sql);
         $depth = 0;
-        $seenCteBody = false;
-        $quote = '';
+        $completedGroup = false;
 
         for ($i = 0; $i < $len; $i++) {
-            $char = $upper[$i];
+            $char = $sql[$i];
+            $pair = substr($sql, $i, 2);
 
-            if ($quote !== '') {
-                if ($char === $quote) {
-                    if ($i + 1 < $len && $upper[$i + 1] === $quote) {
-                        $i++;
-                    } else {
-                        $quote = '';
+            if ($pair === '--' || $char === '#') {
+                $commentLength = strcspn($sql, "\r\n", $i);
+                $i += $commentLength;
+                continue;
+            }
+
+            if ($pair === '/*') {
+                $end = strpos($sql, '*/', $i + 2);
+                if ($end === false) {
+                    break;
+                }
+                $i = $end + 1;
+                continue;
+            }
+
+            if ($char === '\'' || $char === '"' || $char === '`') {
+                $quote = $char;
+                while (true) {
+                    $end = strpos($sql, $quote, $i + 1);
+                    if ($end === false) {
+                        $i = $len;
+                        break;
                     }
+                    $i = $end;
+                    if (str_starts_with(substr($sql, $i), $quote . $quote)) {
+                        $i++;
+                        continue;
+                    }
+                    break;
                 }
                 continue;
             }
 
-            if ($char === '\'' || $char === '"') {
-                $quote = $char;
+            if ($char === '[') {
+                $end = strpos($sql, ']', $i);
+                $i = $end === false ? $len : $end;
                 continue;
             }
 
             if ($char === '(') {
                 $depth++;
-                $seenCteBody = true;
                 continue;
             }
 
             if ($char === ')') {
                 if ($depth > 0) {
                     $depth--;
+                    if ($depth === 0) {
+                        $completedGroup = true;
+                    }
                 }
                 continue;
             }
 
-            if (!$seenCteBody || $depth !== 0 || !ctype_alpha($char)) {
+            $start = $i;
+            $tokenLength = strspn($sql, 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_$', $i);
+            if ($tokenLength === 0) {
                 continue;
             }
 
-            $prev = $i > 0 ? $upper[$i - 1] : '';
-            if (ctype_alpha($prev)) {
+            $token = substr($sql, $i, $tokenLength);
+            $i += $tokenLength - 1;
+            if ($depth === 0 && strspn($token, 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz') > 0) {
+                $keywords[] = [
+                    'keyword' => strtoupper($token),
+                    'afterGroup' => $completedGroup,
+                    'offset' => $start,
+                ];
+            }
+        }
+
+        return $keywords;
+    }
+
+    /**
+     * @return array{keyword: string, offset: int}|null
+     */
+    private function findInsertSourceClause(string $sql): ?array
+    {
+        $foundInsert = false;
+        foreach ($this->scanTopLevelKeywords($sql) as $token) {
+            if (!$foundInsert) {
+                $foundInsert = $token['keyword'] === 'INSERT' || $token['keyword'] === 'REPLACE';
                 continue;
             }
 
-            $j = $i;
-            while ($j < $len && ctype_alpha($upper[$j])) {
-                $j++;
+            if ($token['keyword'] === 'VALUES' || $token['keyword'] === 'SELECT') {
+                return [
+                    'keyword' => $token['keyword'],
+                    'offset' => $token['offset'],
+                ];
             }
-
-            $keyword = substr($upper, $i, $j - $i);
-
-            $result = match ($keyword) {
-                'SELECT' => 'SELECT',
-                'INSERT', 'REPLACE' => 'INSERT',
-                'UPDATE' => 'UPDATE',
-                'DELETE' => 'DELETE',
-                default => null,
-            };
-
-            if ($result !== null) {
-                return $result;
-            }
-
-            $i = $j - 1;
         }
 
         return null;
@@ -492,6 +577,7 @@ final class SqliteParser
 
     private function extractInsertTable(string $sql): ?string
     {
+        $sql = $this->stripComments($sql);
         if (preg_match('/\bINTO\s+("(?:[^"]|"")*"|`(?:[^`]|``)*`|\[(?:[^\]])*\]|[^\s(]+)/i', $sql, $matches) === 1) {
             return $this->unquoteIdentifier($matches[1]);
         }
@@ -505,6 +591,7 @@ final class SqliteParser
 
     private function extractUpdateTable(string $sql): ?string
     {
+        $sql = $this->stripComments($sql);
         if (preg_match('/^UPDATE\s+(?:OR\s+(?:ROLLBACK|ABORT|REPLACE|FAIL|IGNORE)\s+)?("(?:[^"]|"")*"|`(?:[^`]|``)*`|\[(?:[^\]])*\]|[^\s,]+)/i', trim($sql), $matches) === 1) {
             return $this->unquoteIdentifier($matches[1]);
         }
@@ -514,6 +601,7 @@ final class SqliteParser
 
     private function extractDeleteTable(string $sql): ?string
     {
+        $sql = $this->stripComments($sql);
         if (preg_match('/\bFROM\s+("(?:[^"]|"")*"|`(?:[^`]|``)*`|\[(?:[^\]])*\]|[^\s,]+)/i', $sql, $matches) === 1) {
             return $this->unquoteIdentifier($matches[1]);
         }
@@ -523,6 +611,7 @@ final class SqliteParser
 
     private function extractCreateTableName(string $sql): ?string
     {
+        $sql = $this->stripComments($sql);
         if (preg_match('/^CREATE\s+(?:TEMPORARY\s+)?TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?("(?:[^"]|"")*"|`(?:[^`]|``)*`|\[(?:[^\]])*\]|[^\s(]+)/i', trim($sql), $matches) === 1) {
             return $this->unquoteIdentifier($matches[1]);
         }
@@ -532,6 +621,7 @@ final class SqliteParser
 
     private function extractDropTableName(string $sql): ?string
     {
+        $sql = $this->stripComments($sql);
         if (preg_match('/^DROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?("(?:[^"]|"")*"|`(?:[^`]|``)*`|\[(?:[^\]])*\]|[^\s;]+)/i', trim($sql), $matches) === 1) {
             return $this->unquoteIdentifier($matches[1]);
         }
@@ -541,6 +631,7 @@ final class SqliteParser
 
     private function extractAlterTableName(string $sql): ?string
     {
+        $sql = $this->stripComments($sql);
         if (preg_match('/^ALTER\s+TABLE\s+("(?:[^"]|"")*"|`(?:[^`]|``)*`|\[(?:[^\]])*\]|[^\s]+)/i', trim($sql), $matches) === 1) {
             return $this->unquoteIdentifier($matches[1]);
         }

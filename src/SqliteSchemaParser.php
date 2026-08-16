@@ -45,9 +45,9 @@ final class SqliteSchemaParser implements SchemaParser
                 continue;
             }
 
-            $upperDef = strtoupper(ltrim($def));
+            $leadingKeyword = $this->leadingKeyword($def);
 
-            if (str_starts_with($upperDef, 'PRIMARY KEY')) {
+            if ($leadingKeyword === 'PRIMARY') {
                 if (preg_match('/^PRIMARY\s+KEY\s*\(([^)]+)\)/i', $def, $pkMatches) === 1) {
                     $pkCols = $this->parseColumnNameList($pkMatches[1]);
                     $primaryKeys = array_merge($primaryKeys, $pkCols);
@@ -55,7 +55,7 @@ final class SqliteSchemaParser implements SchemaParser
                 continue;
             }
 
-            if (str_starts_with($upperDef, 'UNIQUE')) {
+            if ($leadingKeyword === 'UNIQUE') {
                 if (preg_match('/^UNIQUE\s*\(([^)]+)\)/i', $def, $uniqueMatches) === 1) {
                     $uniqueCols = $this->parseColumnNameList($uniqueMatches[1]);
                     if ($uniqueCols !== []) {
@@ -66,7 +66,7 @@ final class SqliteSchemaParser implements SchemaParser
                 continue;
             }
 
-            if (str_starts_with($upperDef, 'CONSTRAINT')) {
+            if ($leadingKeyword === 'CONSTRAINT') {
                 if (preg_match('/^CONSTRAINT\s+(?:"(?:[^"]|"")*"|`(?:[^`]|``)*`|[^\s]+)\s+PRIMARY\s+KEY\s*\(([^)]+)\)/i', $def, $pkMatches) === 1) {
                     $pkCols = $this->parseColumnNameList($pkMatches[1]);
                     $primaryKeys = array_merge($primaryKeys, $pkCols);
@@ -81,7 +81,7 @@ final class SqliteSchemaParser implements SchemaParser
                 continue;
             }
 
-            if (str_starts_with($upperDef, 'FOREIGN KEY') || str_starts_with($upperDef, 'CHECK')) {
+            if ($leadingKeyword === 'FOREIGN' || $leadingKeyword === 'CHECK') {
                 continue;
             }
 
@@ -229,20 +229,21 @@ final class SqliteSchemaParser implements SchemaParser
         }
 
         $rest = trim(substr($def, strlen($matches[1])));
-        $upperRest = strtoupper($rest);
+        $leadingKeyword = $this->leadingKeyword($rest);
 
         $type = null;
-        if ($rest !== '' && !str_starts_with($upperRest, 'PRIMARY')
-            && !str_starts_with($upperRest, 'NOT')
-            && !str_starts_with($upperRest, 'UNIQUE')
-            && !str_starts_with($upperRest, 'CHECK')
-            && !str_starts_with($upperRest, 'DEFAULT')
-            && !str_starts_with($upperRest, 'REFERENCES')
-            && !str_starts_with($upperRest, 'CONSTRAINT')
-            && !str_starts_with($upperRest, 'COLLATE')
-            && !str_starts_with($upperRest, 'GENERATED')
-            && !str_starts_with($upperRest, 'AS')
-        ) {
+        if (!in_array($leadingKeyword, [
+            'PRIMARY',
+            'NOT',
+            'UNIQUE',
+            'CHECK',
+            'DEFAULT',
+            'REFERENCES',
+            'CONSTRAINT',
+            'COLLATE',
+            'GENERATED',
+            'AS',
+        ], true)) {
             $type = $this->extractColumnType($rest);
         }
 
@@ -258,6 +259,12 @@ final class SqliteSchemaParser implements SchemaParser
             'primaryKey' => $primaryKey,
             'unique' => $unique,
         ];
+    }
+
+    private function leadingKeyword(string $sql): string
+    {
+        $length = strspn($sql, 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_$');
+        return strtoupper(substr($sql, 0, $length));
     }
 
     /**

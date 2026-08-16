@@ -19,7 +19,7 @@ final class ClassifyNeverThrowsChecker implements InvariantChecker
     public function check(string $sql): ?InvariantViolation
     {
         try {
-            $this->guard->classify($sql);
+            $classification = $this->guard->classify($sql);
             return null;
         } catch (Throwable $e) {
             return new InvariantViolation(

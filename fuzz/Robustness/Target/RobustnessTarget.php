@@ -13,7 +13,9 @@ use Fuzz\Robustness\Invariant\RewriteExceptionTypeChecker;
 use Fuzz\Robustness\Invariant\RewritePlanConsistencyChecker;
 use Fuzz\Robustness\Invariant\ShadowStoreConsistencyChecker;
 use SqlFaker\SqliteProvider;
-use Throwable;
+use ZtdQuery\Exception\SimulationException;
+use ZtdQuery\Exception\UnknownSchemaException;
+use ZtdQuery\Exception\UnsupportedSqlException;
 use ZtdQuery\Platform\Sqlite\SqliteMutationResolver;
 use ZtdQuery\Platform\Sqlite\SqliteParser;
 use ZtdQuery\Platform\Sqlite\SqliteQueryGuard;
@@ -88,14 +90,18 @@ final class RobustnessTarget
         }
 
         try {
-            $plan = $this->rewriter->rewrite($sql);
+            try {
+                $plan = $this->rewriter->rewrite($sql);
+            } catch (UnsupportedSqlException | UnknownSchemaException) {
+                return;
+            }
 
             if ($plan->kind() === QueryKind::WRITE_SIMULATED || $plan->kind() === QueryKind::DDL_SIMULATED) {
                 $mutation = $plan->mutation();
                 if ($mutation !== null) {
                     try {
                         $mutation->apply($this->shadowStore, []);
-                    } catch (Throwable) {
+                    } catch (SimulationException) {
                     }
 
                     $violation = $this->storeChecker->check($sql);
@@ -104,10 +110,9 @@ final class RobustnessTarget
                     }
                 }
             }
-        } catch (Throwable) {
+        } finally {
+            $this->resetShadowStore();
         }
-
-        $this->resetShadowStore();
     }
 
     private function resetShadowStore(): void

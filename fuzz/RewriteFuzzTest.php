@@ -151,6 +151,20 @@ final class RewriteFuzzTest extends TestCase
         self::addToAssertionCount(self::ITERATIONS);
     }
 
+    public function testRewriteMultipleDmlStatements(): void
+    {
+        for ($i = 0; $i < self::ITERATIONS; $i++) {
+            $sql = $this->provider->multiDmlStatement();
+            $statements = $this->rewriter->splitStatements($sql);
+            $plans = $this->rewriter->rewriteMultiple($sql);
+
+            self::assertCount(2, $statements, "SQL batch should contain two statements on iteration $i");
+            self::assertSame(2, $plans->count(), "SQL batch should produce two plans on iteration $i");
+            self::assertSame(QueryKind::WRITE_SIMULATED, $plans->get(0)?->kind());
+            self::assertSame(QueryKind::WRITE_SIMULATED, $plans->get(1)?->kind());
+        }
+    }
+
     public function testRewriteCreateTableReturnsDdlSimulatedKind(): void
     {
         for ($i = 0; $i < self::ITERATIONS; $i++) {

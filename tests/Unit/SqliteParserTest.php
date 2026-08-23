@@ -12,9 +12,37 @@ use ZtdQuery\Platform\Sqlite\SqliteLexicalMasker;
 use ZtdQuery\Platform\Sqlite\SqliteParser;
 
 #[CoversClass(SqliteParser::class)]
+#[UsesClass(\ZtdQuery\Platform\Sqlite\SqliteSelectRelationParser::class)]
 #[UsesClass(SqliteLexicalMasker::class)]
+#[UsesClass(\ZtdQuery\Platform\Sqlite\SqliteLexerProfile::class)]
 final class SqliteParserTest extends TestCase
 {
+    public function testExtractsOnConflictUpdateWhereAfterInsertSelectWhere(): void
+    {
+        $parser = new SqliteParser();
+        $sql = 'INSERT INTO items SELECT * FROM source WHERE active ON CONFLICT (id) DO UPDATE SET score = excluded.score WHERE items.score >= 80 RETURNING id';
+
+        self::assertSame('items.score >= 80', $parser->extractOnConflictUpdateWhere($sql));
+    }
+
+    public function testReturnsNullWithoutOnConflictUpdateWhere(): void
+    {
+        $parser = new SqliteParser();
+
+        self::assertNull($parser->extractOnConflictUpdateWhere(
+            'INSERT INTO items VALUES (1, 90) ON CONFLICT (id) DO UPDATE SET score = excluded.score',
+        ));
+    }
+
+    public function testRequiresCompleteDoUpdateSetAnchor(): void
+    {
+        $parser = new SqliteParser();
+
+        self::assertNull($parser->extractOnConflictUpdateWhere(
+            'INSERT INTO items VALUES (1, 90) ON CONFLICT (id) UPDATE SET score = excluded.score WHERE items.score >= 80',
+        ));
+    }
+
     public function testClassifySelect(): void
     {
         $parser = new SqliteParser();
@@ -67,6 +95,9 @@ final class SqliteParserTest extends TestCase
     {
         $parser = new SqliteParser();
         self::assertSame('CREATE_TABLE', $parser->classifyStatement('CREATE TEMPORARY TABLE tmp (id INTEGER)'));
+        self::assertSame('CREATE_TABLE', $parser->classifyStatement('CREATE TEMP TABLE tmp (id INTEGER)'));
+        self::assertSame('tmp', $parser->extractTargetTable('CREATE TEMP TABLE tmp (id INTEGER)'));
+        self::assertSame('tmp', $parser->extractTargetTable('  CREATE TEMP TABLE tmp (id INTEGER)'));
     }
 
     public function testClassifyDropTable(): void
@@ -161,6 +192,86 @@ SELECT * FROM users'));
         self::assertSame('users', $parser->extractTargetTable('DELETE FROM users WHERE id = 1'));
     }
 
+    public function testExtractUpdateAliasFromStructuredTarget(): void
+    {
+        $parser = new SqliteParser();
+
+        self::assertSame('target', $parser->extractUpdateAlias('UPDATE users AS target SET name = \'Alice\' WHERE target.id = 1'));
+        self::assertSame('target', $parser->extractUpdateAlias('UPDATE users target SET name = \'Alice\' WHERE target.id = 1'));
+        self::assertNull($parser->extractUpdateAlias('UPDATE users SET name = \'Alice\' WHERE id = 1'));
+    }
+
+    public function testExtractUpdateAliasHandlesConflictSchemaAndBracketedTarget(): void
+    {
+        $parser = new SqliteParser();
+
+        self::assertSame(
+            'target',
+            $parser->extractUpdateAlias(
+                'UPDATE OR REPLACE main.[user table] AS target SET name = \'Alice\' WHERE target.id = 1',
+            ),
+        );
+    }
+
+    public function testExtractUpdateAliasHandlesEscapedBracketTargetWithoutAs(): void
+    {
+        $parser = new SqliteParser();
+
+        self::assertSame(
+            'target',
+            $parser->extractUpdateAlias(
+                'UPDATE main.[user]]table] target SET name = \'Alice\' WHERE target.id = 1',
+            ),
+        );
+        self::assertNull(
+            $parser->extractUpdateAlias('UPDATE + ignored ] AS target SET name = \'Alice\''),
+        );
+    }
+
+    public function testExtractUpdateAliasSkipsNestedUpdateKeyword(): void
+    {
+        $parser = new SqliteParser();
+
+        self::assertSame(
+            'target',
+            $parser->extractUpdateAlias(
+                'WITH source AS (SELECT UPDATE FROM audit) UPDATE users AS target SET name = \'Alice\'',
+            ),
+        );
+    }
+
+    public function testExtractUpdateAliasRejectsIncompleteTargets(): void
+    {
+        $parser = new SqliteParser();
+
+        self::assertNull($parser->extractUpdateAlias('UPDATE'));
+        self::assertNull($parser->extractUpdateAlias('UPDATE users'));
+        self::assertNull($parser->extractUpdateAlias('UPDATE [users]'));
+        self::assertNull($parser->extractUpdateAlias('UPDATE users target'));
+    }
+
+    public function testExtractUpdateFromClausePreservesJoinSource(): void
+    {
+        $parser = new SqliteParser();
+
+        self::assertSame(
+            'incoming AS source',
+            $parser->extractUpdateFromClause('UPDATE inventory SET quantity = source.quantity FROM incoming AS source WHERE inventory.id = source.id'),
+        );
+    }
+
+    public function testExtractUpdateFromClauseStopsBeforeOrderedLimit(): void
+    {
+        $parser = new SqliteParser();
+
+        self::assertSame(
+            'incoming AS source',
+            $parser->extractUpdateFromClause(
+                'UPDATE inventory SET quantity = source.quantity FROM incoming AS source ORDER BY source.id LIMIT 1',
+            ),
+        );
+    }
+
     public function testExtractCreateTableTarget(): void
     {
         $parser = new SqliteParser();
@@ -192,6 +303,18 @@ SELECT * FROM users'));
         $tables = $parser->extractSelectTables('SELECT * FROM users JOIN orders ON users.id = orders.user_id');
         self::assertContains('users', $tables);
         self::assertContains('orders', $tables);
+    }
+
+    public function testExtractSelectTablesDeduplicatesAndReindexesInFirstSeenOrder(): void
+    {
+        $parser = new SqliteParser();
+
+        self::assertSame(
+            ['users', 'orders'],
+            $parser->extractSelectTables(
+                'SELECT * FROM users UNION SELECT * FROM users UNION SELECT * FROM orders'
+            ),
+        );
     }
 
     public function testExtractInsertColumns(): void
@@ -288,6 +411,30 @@ SELECT * FROM users'));
         );
         self::assertArrayHasKey('name', $updates);
         self::assertSame('excluded.name', $updates['name']);
+    }
+
+    public function testExtractOnConflictStopsBeforeReturningWithoutWhere(): void
+    {
+        $parser = new SqliteParser();
+
+        self::assertSame(
+            ['name' => 'excluded.name'],
+            $parser->extractOnConflictUpdates(
+                'INSERT INTO users (id, name) VALUES (1, "Alice") ON CONFLICT (id) DO UPDATE SET name = excluded.name RETURNING id'
+            ),
+        );
+    }
+
+    public function testExtractOnConflictRejectsNonUpdateActionContainingSet(): void
+    {
+        $parser = new SqliteParser();
+
+        self::assertSame(
+            [],
+            $parser->extractOnConflictUpdates(
+                'INSERT INTO users (id, name) VALUES (1, "Alice") ON CONFLICT (id) DO NOTHING SET name = excluded.name'
+            ),
+        );
     }
 
     public function testHasInsertSelect(): void
@@ -871,6 +1018,16 @@ SELECT * FROM users'));
     {
         $parser = new SqliteParser();
         self::assertSame('id', $parser->extractOrderByClause('SELECT * FROM users ORDER BY id LIMIT 5'));
+    }
+
+    public function testExtractOrderByClauseRequiresOrderBeforeBy(): void
+    {
+        $parser = new SqliteParser();
+
+        self::assertSame(
+            'value',
+            $parser->extractOrderByClause('SELECT value AS by FROM users ORDER BY value'),
+        );
     }
 
     public function testExtractOrderByClauseNone(): void
@@ -2697,7 +2854,7 @@ SELECT * FROM users'));
     {
         $parser = new SqliteParser();
         $tables = $parser->extractSelectTables('SELECT * FROM (SELECT 1)');
-        self::assertNotEmpty($tables);
+        self::assertSame([], $tables);
     }
 
     public function testExtractSelectTablesMultiline(): void
@@ -2859,5 +3016,68 @@ SELECT * FROM users'));
         $parser = new SqliteParser();
 
         self::assertSame('SELECT 1', $parser->extractInsertSelect("INSERT INTO target SELECT 1 \n\t"));
+    }
+
+    public function testUpdateClausesIgnoreKeywordsInsideExpressionsAndSubqueries(): void
+    {
+        $parser = new SqliteParser();
+        $sql = "UPDATE products SET price = CAST(raw AS NUMERIC(10,2)), maximum = (SELECT MAX(price) FROM products p2 WHERE p2.category_id = products.category_id) FROM categories c WHERE products.category_id = c.id ORDER BY products.id LIMIT 1 RETURNING *";
+
+        self::assertSame([
+            'price' => 'CAST(raw AS NUMERIC(10,2))',
+            'maximum' => '(SELECT MAX(price) FROM products p2 WHERE p2.category_id = products.category_id)',
+        ], $parser->extractUpdateAssignments($sql));
+        self::assertSame('products.category_id = c.id', $parser->extractWhereClause($sql));
+        self::assertSame('products.id', $parser->extractOrderByClause($sql));
+        self::assertSame('1', $parser->extractLimitClause($sql));
+    }
+
+    public function testConflictAssignmentsIgnoreNestedWhereAndReturningKeywords(): void
+    {
+        $parser = new SqliteParser();
+        $sql = 'INSERT INTO target (id, value) VALUES (1, 2) ON CONFLICT (id) DO UPDATE SET value = (SELECT value FROM source WHERE source.id = excluded.id), note = \'returning where\' WHERE target.active RETURNING *';
+
+        self::assertSame([
+            'value' => '(SELECT value FROM source WHERE source.id = excluded.id)',
+            'note' => "'returning where'",
+        ], $parser->extractOnConflictUpdates($sql));
+    }
+
+    public function testSelectTablesComeFromSelectScopesOnly(): void
+    {
+        $parser = new SqliteParser();
+        $sql = 'SELECT printf(\'from %s\', name) FROM events WHERE id IN (SELECT event_id FROM archived_events)';
+
+        self::assertSame(['events', 'archived_events'], $parser->extractSelectTables($sql));
+    }
+
+    public function testExtractTargetTableUsesTheTopLevelDmlTailAfterCtesAndComments(): void
+    {
+        $parser = new SqliteParser();
+
+        self::assertSame(
+            'insert_target',
+            $parser->extractTargetTable(
+                "WITH source AS (SELECT 'INTO decoy') /* boundary */ INSERT/* keyword */INTO insert_target VALUES (1)",
+            ),
+        );
+        self::assertSame(
+            'replace_target',
+            $parser->extractTargetTable(
+                "WITH source AS (SELECT 'INTO decoy') /* boundary */ REPLACE/* keyword */INTO replace_target VALUES (1)",
+            ),
+        );
+        self::assertSame(
+            'update_target',
+            $parser->extractTargetTable(
+                'WITH source AS (SELECT 1 AS UPDATE) /* boundary */ UPDATE/* keyword */update_target SET value = 1',
+            ),
+        );
+        self::assertSame(
+            'delete_target',
+            $parser->extractTargetTable(
+                'WITH source AS (SELECT * FROM decoy) /* boundary */ DELETE/* keyword */FROM delete_target',
+            ),
+        );
     }
 }

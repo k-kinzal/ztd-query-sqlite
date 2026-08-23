@@ -62,6 +62,41 @@ final class FullPipelineFuzzTest extends TestCase
         $this->provider = new SqliteProvider($this->faker);
     }
 
+    public function testSelfReferencingUpsertPreservesSemanticResult(): void
+    {
+        $this->faker->seed(20260816);
+        for ($i = 0; $i < self::ITERATIONS; $i++) {
+            $existing = $this->faker->numberBetween(1, 100000);
+            $incoming = $this->faker->numberBetween(1, 100000);
+            $reference = $this->faker->randomElement(['quantity', 'items.quantity']);
+            self::assertIsString($reference);
+            $shadowStore = new ShadowStore();
+            $shadowStore->set('items', [['id' => 1, 'quantity' => $existing]]);
+            $registry = new TableDefinitionRegistry();
+            $registry->register('items', new TableDefinition(
+                ['id', 'quantity'],
+                ['id' => 'INTEGER', 'quantity' => 'INTEGER'],
+                ['id'],
+                ['id'],
+                [],
+            ));
+            $rewriter = $this->buildRewriter($shadowStore, $registry);
+            $plan = $rewriter->rewrite(sprintf(
+                'INSERT INTO items VALUES (1, %d) ON CONFLICT(id) DO UPDATE SET quantity = %s + excluded.quantity',
+                $incoming,
+                $reference,
+            ));
+            $mutation = $plan->mutation();
+            self::assertNotNull($mutation);
+            $mutation->apply($shadowStore, [['id' => 1, 'quantity' => $incoming]]);
+
+            self::assertSame(
+                [['id' => 1, 'quantity' => $existing + $incoming]],
+                $shadowStore->get('items'),
+            );
+        }
+    }
+
     /**
      * Build a fresh rewriter with given registry and shadow store.
      */

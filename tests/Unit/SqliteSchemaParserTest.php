@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Tests\Unit;
 
 use PHPUnit\Framework\Attributes\CoversClass;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\Attributes\UsesClass;
 use Tests\Contract\SchemaParserContractTest;
 use ZtdQuery\Platform\SchemaParser;
@@ -12,10 +13,14 @@ use ZtdQuery\Platform\Sqlite\SqliteLexicalMasker;
 use ZtdQuery\Platform\Sqlite\SqliteParser;
 use ZtdQuery\Platform\Sqlite\SqliteSchemaParser;
 use ZtdQuery\Schema\ColumnTypeFamily;
+use ZtdQuery\Schema\IdentityGenerationStrategy;
 
 #[CoversClass(SqliteSchemaParser::class)]
+#[UsesClass(\ZtdQuery\Platform\Sqlite\SqliteColumnTypeMapper::class)]
+#[UsesClass(\ZtdQuery\Platform\Sqlite\SqliteForeignKeyDefinitionParser::class)]
 #[UsesClass(SqliteLexicalMasker::class)]
 #[UsesClass(SqliteParser::class)]
+#[UsesClass(\ZtdQuery\Platform\Sqlite\SqliteLexerProfile::class)]
 final class SqliteSchemaParserTest extends SchemaParserContractTest
 {
     protected function createParser(): SchemaParser
@@ -93,6 +98,70 @@ final class SqliteSchemaParserTest extends SchemaParserContractTest
         self::assertSame(['id', 'name'], $result->columns);
     }
 
+    public function testParseFts5VirtualTableColumnsAndOptions(): void
+    {
+        $parser = new SqliteSchemaParser();
+        $result = $parser->parse(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS main.fts_articles USING fts5("
+            . 'title, "article body" UNINDEXED, '
+            . "tokenize='porter unicode61', prefix='2 3')",
+        );
+
+        self::assertNotNull($result);
+        self::assertSame(['title', 'article body'], $result->columns);
+        self::assertSame(['title' => 'TEXT', 'article body' => 'TEXT'], $result->columnTypes);
+        self::assertSame(ColumnTypeFamily::TEXT, $result->typedColumns['title']->family);
+    }
+
+    public function testParseFts5OptionsBeforeColumns(): void
+    {
+        $result = (new SqliteSchemaParser())->parse(
+            "CREATE VIRTUAL TABLE articles USING fts5(tokenize='porter', content='source', "
+            . 'title, body UNINDEXED);',
+        );
+
+        self::assertNotNull($result);
+        self::assertSame(['title', 'body'], $result->columns);
+    }
+
+    public function testParseFts5WithWhitespaceBeforeTheTerminator(): void
+    {
+        $result = (new SqliteSchemaParser())->parse(
+            'CREATE VIRTUAL TABLE articles USING fts5(title) ;',
+        );
+
+        self::assertNotNull($result);
+        self::assertSame(['title'], $result->columns);
+    }
+
+    #[DataProvider('providerInvalidFts5Declaration')]
+    public function testRejectsInvalidFts5Declaration(string $sql): void
+    {
+        self::assertNull((new SqliteSchemaParser())->parse($sql));
+    }
+
+    /** @return iterable<string, array{string}> */
+    public static function providerInvalidFts5Declaration(): iterable
+    {
+        yield 'wrong create keyword' => ['WRONG VIRTUAL TABLE articles USING fts5(title)'];
+        yield 'create only' => ['CREATE'];
+        yield 'missing table keyword' => ['CREATE VIRTUAL'];
+        yield 'missing virtual' => ['CREATE TABLE articles USING fts5(title)'];
+        yield 'wrong virtual keyword' => ['CREATE WRONG TABLE articles USING fts5(title)'];
+        yield 'missing table' => ['CREATE VIRTUAL INDEX articles USING fts5(title)'];
+        yield 'missing using' => ['CREATE VIRTUAL TABLE articles'];
+        yield 'missing module' => ['CREATE VIRTUAL TABLE articles USING'];
+        yield 'wrong module' => ['CREATE VIRTUAL TABLE articles USING fts4(title)'];
+        yield 'missing opening parenthesis' => ['CREATE VIRTUAL TABLE articles USING fts5 title'];
+        yield 'missing closing parenthesis' => ['CREATE VIRTUAL TABLE articles USING fts5(title'];
+        yield 'empty body' => ['CREATE VIRTUAL TABLE articles USING fts5()'];
+        yield 'options only' => ["CREATE VIRTUAL TABLE articles USING fts5(tokenize='porter')"];
+        yield 'typed column' => ['CREATE VIRTUAL TABLE articles USING fts5(title TEXT)'];
+        yield 'extra column modifier' => ['CREATE VIRTUAL TABLE articles USING fts5(title UNINDEXED extra)'];
+        yield 'non-identifier column' => ['CREATE VIRTUAL TABLE articles USING fts5(42)'];
+        yield 'unexpected suffix' => ['CREATE VIRTUAL TABLE articles USING fts5(title) WITHOUT ROWID'];
+    }
+
     public function testParseWithQuotedIdentifiers(): void
     {
         $parser = new SqliteSchemaParser();
@@ -127,6 +196,174 @@ final class SqliteSchemaParserTest extends SchemaParserContractTest
 
         self::assertNotNull($result);
         self::assertSame(['id', 'status', 'created_at'], $result->columns);
+        self::assertSame([
+            'status' => "'active'",
+            'created_at' => 'CURRENT_TIMESTAMP',
+        ], $result->columnDefaults);
+    }
+
+    public function testParsePreservesParenthesizedDefaultExpressionBeforeConstraint(): void
+    {
+        $result = (new SqliteSchemaParser())->parse(
+            "CREATE TABLE t (label TEXT DEFAULT (printf('%s,%s', 'a', 'b')) NOT NULL, enabled INTEGER DEFAULT 1)"
+        );
+
+        self::assertNotNull($result);
+        self::assertSame([
+            'label' => "(printf('%s,%s', 'a', 'b'))",
+            'enabled' => '1',
+        ], $result->columnDefaults);
+    }
+
+    public function testParseStopsDefaultAtInlinePrimaryKeyConstraint(): void
+    {
+        $result = (new SqliteSchemaParser())->parse('CREATE TABLE t (id INTEGER DEFAULT 7 PRIMARY KEY)');
+
+        self::assertNotNull($result);
+        self::assertSame(['id' => '7'], $result->columnDefaults);
+        self::assertSame(['id'], $result->primaryKeys);
+    }
+
+    public function testParseIntegerPrimaryKeyAsMaxValueIdentity(): void
+    {
+        $definition = (new SqliteSchemaParser())->parse(
+            'CREATE TABLE users (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT)'
+        );
+
+        self::assertNotNull($definition);
+        self::assertSame(['id' => IdentityGenerationStrategy::MaxValue], $definition->identityStrategies);
+    }
+
+    public function testWithoutRowidPrimaryKeyIsNotIdentity(): void
+    {
+        $definition = (new SqliteSchemaParser())->parse(
+            'CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT) WITHOUT ROWID'
+        );
+
+        self::assertNotNull($definition);
+        self::assertSame([], $definition->identityStrategies);
+    }
+
+    public function testStrictTableRetainsColumnsTypesAndRowidIdentity(): void
+    {
+        $definition = (new SqliteSchemaParser())->parse(
+            'CREATE TABLE measurements (id INTEGER PRIMARY KEY, sensor TEXT NOT NULL, reading REAL NOT NULL) STRICT'
+        );
+
+        self::assertNotNull($definition);
+        self::assertSame(['id', 'sensor', 'reading'], $definition->columns);
+        self::assertSame([
+            'id' => 'INTEGER',
+            'sensor' => 'TEXT',
+            'reading' => 'REAL',
+        ], $definition->columnTypes);
+        self::assertSame(['id' => IdentityGenerationStrategy::MaxValue], $definition->identityStrategies);
+    }
+
+    public function testStrictAndWithoutRowidOptionsAreAcceptedInEitherOrder(): void
+    {
+        $strictLast = (new SqliteSchemaParser())->parse(
+            'CREATE TABLE events (id INTEGER PRIMARY KEY, payload BLOB) WITHOUT ROWID, STRICT;'
+        );
+        $withoutLast = (new SqliteSchemaParser())->parse(
+            'CREATE TABLE events (id INTEGER PRIMARY KEY, payload BLOB) STRICT, WITHOUT ROWID'
+        );
+
+        self::assertNotNull($strictLast);
+        self::assertNotNull($withoutLast);
+        self::assertSame([], $strictLast->identityStrategies);
+        self::assertSame([], $withoutLast->identityStrategies);
+    }
+
+    public function testTempStrictTableIsAcceptedWithTriviaBeforeOption(): void
+    {
+        $definition = (new SqliteSchemaParser())->parse(
+            "CREATE TEMP TABLE events (id INTEGER PRIMARY KEY, payload BLOB) /* option */ STRICT\n"
+        );
+
+        self::assertNotNull($definition);
+        self::assertSame(['id', 'payload'], $definition->columns);
+    }
+
+    #[DataProvider('providerInvalidTableOptionSuffixes')]
+    public function testRejectsInvalidTableOptionSuffix(string $suffix): void
+    {
+        self::assertNull((new SqliteSchemaParser())->parse(
+            'CREATE TABLE events (id INTEGER PRIMARY KEY) ' . $suffix
+        ));
+    }
+
+    /** @return \Generator<string, array{string}> */
+    public static function providerInvalidTableOptionSuffixes(): \Generator
+    {
+        yield 'unknown option' => ['COMPRESS'];
+        yield 'missing rowid' => ['WITHOUT'];
+        yield 'missing comma' => ['STRICT WITHOUT ROWID'];
+        yield 'symbol instead of comma' => ['STRICT + WITHOUT ROWID'];
+        yield 'trailing comma' => ['STRICT,'];
+        yield 'duplicate strict' => ['STRICT, STRICT'];
+        yield 'duplicate without rowid' => ['WITHOUT ROWID, WITHOUT ROWID'];
+        yield 'extra closing parenthesis' => [') STRICT'];
+        yield 'statement after semicolon' => ['STRICT; SELECT 1'];
+    }
+
+    public function testLowercaseWithoutRowidIsNotIdentity(): void
+    {
+        $definition = (new SqliteSchemaParser())->parse(
+            'CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT) without rowid'
+        );
+
+        self::assertNotNull($definition);
+        self::assertSame([], $definition->identityStrategies);
+    }
+
+    public function testWithoutRowidTextInsideDefaultDoesNotDisableIdentity(): void
+    {
+        $definition = (new SqliteSchemaParser())->parse(
+            "CREATE TABLE users (id INTEGER PRIMARY KEY, note TEXT DEFAULT 'WITHOUT ROWID')"
+        );
+
+        self::assertNotNull($definition);
+        self::assertSame(['id' => IdentityGenerationStrategy::MaxValue], $definition->identityStrategies);
+    }
+
+    public function testNestedWithoutRowidTokensDoNotDisableIdentity(): void
+    {
+        $definition = (new SqliteSchemaParser())->parse(
+            'CREATE TABLE users (id INTEGER PRIMARY KEY, value TEXT CHECK (WITHOUT ROWID))'
+        );
+
+        self::assertNotNull($definition);
+        self::assertSame(['id' => IdentityGenerationStrategy::MaxValue], $definition->identityStrategies);
+    }
+
+    public function testNestedWithoutRowidDoesNotHideRealWithoutRowidClause(): void
+    {
+        $definition = (new SqliteSchemaParser())->parse(
+            'CREATE TABLE users (id INTEGER PRIMARY KEY, value TEXT CHECK (WITHOUT ROWID)) WITHOUT ROWID'
+        );
+
+        self::assertNotNull($definition);
+        self::assertSame([], $definition->identityStrategies);
+    }
+
+    public function testNonIntegerPrimaryKeyIsNotIdentity(): void
+    {
+        $definition = (new SqliteSchemaParser())->parse('CREATE TABLE users (id TEXT PRIMARY KEY)');
+
+        self::assertNotNull($definition);
+        self::assertSame([], $definition->identityStrategies);
+    }
+
+    public function testDuplicatePrimaryKeySourcesStillProduceOneIdentity(): void
+    {
+        $definition = (new SqliteSchemaParser())->parse(
+            'CREATE TABLE users (id INTEGER PRIMARY KEY, PRIMARY KEY (id))'
+        );
+
+        self::assertNotNull($definition);
+        self::assertSame(['id'], $definition->primaryKeys);
+        self::assertSame(['id' => IdentityGenerationStrategy::MaxValue], $definition->identityStrategies);
     }
 
     public function testParseWithForeignKey(): void
@@ -361,13 +598,13 @@ final class SqliteSchemaParserTest extends SchemaParserContractTest
         self::assertSame(ColumnTypeFamily::JSON, $result->typedColumns['a']->family);
     }
 
-    public function testParseTypedColumnsUnknown(): void
+    public function testParseTypedColumnsWithNumericAffinity(): void
     {
         $parser = new SqliteSchemaParser();
         $sql = 'CREATE TABLE t (a CUSTOM_TYPE)';
         $result = $parser->parse($sql);
         self::assertNotNull($result);
-        self::assertSame(ColumnTypeFamily::UNKNOWN, $result->typedColumns['a']->family);
+        self::assertSame(ColumnTypeFamily::DECIMAL, $result->typedColumns['a']->family);
     }
 
     public function testParseTypedColumnsWithParenthesizedSize(): void
@@ -480,6 +717,21 @@ final class SqliteSchemaParserTest extends SchemaParserContractTest
         $result = $parser->parse($sql);
         self::assertNotNull($result);
         self::assertContains('b', $result->columns);
+        self::assertSame(['b' => '(a * 2)'], $result->generatedExpressions);
+    }
+
+    public function testGeneratedExpressionExcludesStoredAndVirtualStorageKeywords(): void
+    {
+        $result = (new SqliteSchemaParser())->parse(
+            'CREATE TABLE t (a INTEGER, stored_value INTEGER GENERATED ALWAYS AS (a * 2) STORED, '
+            . 'virtual_value INTEGER AS (a * 3) VIRTUAL)',
+        );
+
+        self::assertNotNull($result);
+        self::assertSame([
+            'stored_value' => '(a * 2)',
+            'virtual_value' => '(a * 3)',
+        ], $result->generatedExpressions);
     }
 
     public function testParseColumnWithReferences(): void
@@ -636,6 +888,9 @@ final class SqliteSchemaParserTest extends SchemaParserContractTest
         $result = $parser->parse($sql);
         self::assertNotNull($result);
         self::assertSame(['id', 'uid'], $result->columns);
+        self::assertCount(1, $result->foreignKeys);
+        self::assertSame('users', array_values($result->foreignKeys)[0]->referencedTable);
+        self::assertSame(['uid'], array_values($result->foreignKeys)[0]->columns);
     }
 
     public function testParseLowercaseCheck(): void
@@ -844,13 +1099,13 @@ final class SqliteSchemaParserTest extends SchemaParserContractTest
         self::assertSame('INTEGER', $result->typedColumns['a']->nativeType);
     }
 
-    public function testParseColumnTypeFamilyUnknownWithParens(): void
+    public function testParseColumnTypeFamilyNumericAffinityWithParens(): void
     {
         $parser = new SqliteSchemaParser();
         $sql = 'CREATE TABLE t (a CUSTOM_TYPE(10))';
         $result = $parser->parse($sql);
         self::assertNotNull($result);
-        self::assertSame(ColumnTypeFamily::UNKNOWN, $result->typedColumns['a']->family);
+        self::assertSame(ColumnTypeFamily::DECIMAL, $result->typedColumns['a']->family);
         self::assertSame('CUSTOM_TYPE(10)', $result->typedColumns['a']->nativeType);
     }
 
@@ -1170,6 +1425,7 @@ final class SqliteSchemaParserTest extends SchemaParserContractTest
         self::assertNotNull($result);
         self::assertContains('id', $result->columns);
         self::assertArrayNotHasKey('id', $result->columnTypes);
+        self::assertSame(['id' => '(1)'], $result->generatedExpressions);
     }
 
     public function testColumnWithAsKeywordHasNullType(): void
@@ -1180,6 +1436,7 @@ final class SqliteSchemaParserTest extends SchemaParserContractTest
         self::assertNotNull($result);
         self::assertContains('id', $result->columns);
         self::assertArrayNotHasKey('id', $result->columnTypes);
+        self::assertSame(['id' => '(1 + 1)'], $result->generatedExpressions);
     }
 
     public function testDuplicatePrimaryKeysDeduped(): void
@@ -1300,13 +1557,13 @@ final class SqliteSchemaParserTest extends SchemaParserContractTest
         self::assertSame(ColumnTypeFamily::STRING, $result->typedColumns['s']->family);
     }
 
-    public function testColumnTypeUnknownMapsToUnknownFamily(): void
+    public function testColumnTypeWithoutAffinityMarkerMapsToDecimalFamily(): void
     {
         $parser = new SqliteSchemaParser();
         $sql = 'CREATE TABLE t (x CUSTOM_TYPE)';
         $result = $parser->parse($sql);
         self::assertNotNull($result);
-        self::assertSame(ColumnTypeFamily::UNKNOWN, $result->typedColumns['x']->family);
+        self::assertSame(ColumnTypeFamily::DECIMAL, $result->typedColumns['x']->family);
     }
 
     public function testColumnUniqueNotPrimaryKey(): void
@@ -1795,13 +2052,13 @@ final class SqliteSchemaParserTest extends SchemaParserContractTest
         self::assertSame(ColumnTypeFamily::JSON, $result->typedColumns['a']->family);
     }
 
-    public function testMapToColumnTypeFamilyUnknownType(): void
+    public function testMapToColumnTypeFamilyDefaultsToNumericAffinity(): void
     {
         $parser = new SqliteSchemaParser();
         $sql = 'CREATE TABLE t (a FOOBAR)';
         $result = $parser->parse($sql);
         self::assertNotNull($result);
-        self::assertSame(ColumnTypeFamily::UNKNOWN, $result->typedColumns['a']->family);
+        self::assertSame(ColumnTypeFamily::DECIMAL, $result->typedColumns['a']->family);
     }
 
     public function testUniqueConstraintWithEmptyColumnsNotStored(): void

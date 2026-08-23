@@ -29,6 +29,7 @@ final class RewriteTarget
 {
     private Generator $faker;
     private SqliteProvider $provider;
+    private SqliteRewriter $rewriter;
     /** @var array<int, InvariantChecker> */
     private array $checkers;
 
@@ -52,14 +53,14 @@ final class RewriteTarget
         $deleteTransformer = new DeleteTransformer($parser, $selectTransformer);
         $transformer = new SqliteTransformer($parser, $selectTransformer, $insertTransformer, $updateTransformer, $deleteTransformer);
         $mutationResolver = new SqliteMutationResolver($shadowStore, $registry, $schemaParser, $parser);
-        $rewriter = new SqliteRewriter($guard, $shadowStore, $registry, $transformer, $mutationResolver, $parser);
+        $this->rewriter = new SqliteRewriter($guard, $shadowStore, $registry, $transformer, $mutationResolver, $parser);
 
         $this->checkers = [
             new ClassifyNeverThrowsChecker($guard),
             new ClassifyDeterministicChecker($guard),
-            new RewriteExceptionTypeChecker($rewriter),
-            new RewritePlanConsistencyChecker($rewriter),
-            new ClassifyRewriteAgreementChecker($guard, $rewriter),
+            new RewriteExceptionTypeChecker($this->rewriter),
+            new RewritePlanConsistencyChecker($this->rewriter),
+            new ClassifyRewriteAgreementChecker($guard, $this->rewriter),
         ];
     }
 
@@ -75,6 +76,13 @@ final class RewriteTarget
             if ($violation !== null) {
                 throw new \Error("Invariant violation: seed=$seed\n$violation");
             }
+        }
+
+        $batch = $this->provider->multiDmlStatement();
+        $statements = $this->rewriter->splitStatements($batch);
+        $plans = $this->rewriter->rewriteMultiple($batch);
+        if (count($statements) !== 2 || $plans->count() !== 2) {
+            throw new \Error("Invariant violation: seed=$seed\nMulti-statement DML batch was not split into two plans: $batch");
         }
     }
 
@@ -131,6 +139,12 @@ final class RewriteTarget
             fn () => $this->provider->createTableStatement(maxDepth: 5),
             fn () => $this->provider->alterTableStatement(maxDepth: 5),
             fn () => $this->provider->dropTableStatement(maxDepth: 3),
+            fn (): string => $this->provider->insertFunctionUpsertStatement(),
+            fn (): string => $this->provider->temporaryTableStatement(),
+            fn (): string => $this->provider->viewStatement(),
+            fn (): string => $this->provider->generatedColumnStatement(),
+            fn (): string => $this->provider->foreignKeyCascadeStatement(),
+            fn (): string => $this->provider->fullTextSearchStatement(),
         ];
 
         $index = ord($input[0] ?? "\0") % count($generators);

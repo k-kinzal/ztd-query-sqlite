@@ -9,22 +9,84 @@ use PHPUnit\Framework\Attributes\UsesClass;
 use Tests\Contract\TransformerContractTest;
 use ZtdQuery\Platform\CastRenderer;
 use ZtdQuery\Platform\IdentifierQuoter;
+use ZtdQuery\Platform\ValueRenderer;
 use ZtdQuery\Platform\Sqlite\SqliteCastRenderer;
 use ZtdQuery\Platform\Sqlite\SqliteIdentifierQuoter;
 use ZtdQuery\Platform\Sqlite\SqliteLexicalMasker;
 use ZtdQuery\Platform\Sqlite\SqliteParser;
+use ZtdQuery\Platform\Sqlite\SqliteFullTextSearchRewriter;
 use ZtdQuery\Platform\Sqlite\Transformer\SelectTransformer;
 use ZtdQuery\Rewrite\SqlTransformer;
 use ZtdQuery\Schema\ColumnType;
 use ZtdQuery\Schema\ColumnTypeFamily;
 
 #[CoversClass(SelectTransformer::class)]
+#[UsesClass(\ZtdQuery\Platform\Sqlite\SqliteSelectRelationParser::class)]
+#[UsesClass(\ZtdQuery\Platform\Sqlite\SqliteIndexHintStripper::class)]
 #[UsesClass(SqliteCastRenderer::class)]
+#[UsesClass(\ZtdQuery\Platform\Sqlite\SqliteValueRenderer::class)]
 #[UsesClass(SqliteIdentifierQuoter::class)]
 #[UsesClass(SqliteLexicalMasker::class)]
 #[UsesClass(SqliteParser::class)]
+#[UsesClass(\ZtdQuery\Platform\Sqlite\SqliteCteShadowComposer::class)]
+#[UsesClass(\ZtdQuery\Platform\Sqlite\SqliteGeneratedColumnProjector::class)]
+#[UsesClass(SqliteFullTextSearchRewriter::class)]
+#[UsesClass(\ZtdQuery\Platform\Sqlite\SqliteLexerProfile::class)]
 final class SelectTransformerTest extends TransformerContractTest
 {
+    public function testGeneratedColumnsAreRecomputedFromBaseRow(): void
+    {
+        $result = (new SelectTransformer())->transform('SELECT total FROM orders', [
+            'orders' => [
+                'rows' => [['qty' => 5, 'unit_price' => 10, 'total' => null]],
+                'columns' => ['qty', 'unit_price', 'total'],
+                'columnTypes' => [],
+                'generatedExpressions' => ['total' => '(qty * unit_price)'],
+            ],
+        ]);
+
+        self::assertStringContainsString('(qty * unit_price) AS "total"', $result);
+        self::assertStringContainsString('AS "__ztd_generated_source"', $result);
+    }
+
+    public function testTransformMaterializesViewAfterItsShadowTable(): void
+    {
+        $tables = [
+            'users' => [
+                'rows' => [['id' => 1]],
+                'columns' => ['id'],
+                'columnTypes' => [],
+            ],
+            'active_users' => [
+                'viewSql' => 'SELECT * FROM users WHERE id > 0',
+            ],
+            'active_user_count' => [
+                'viewSql' => 'SELECT count(*) AS total FROM active_users',
+            ],
+        ];
+
+        self::assertSame(
+            "WITH \"users\" AS (SELECT CAST(1 AS INTEGER) AS \"id\"),\n\"active_users\" AS (SELECT * FROM users WHERE id > 0),\n\"active_user_count\" AS (SELECT count(*) AS total FROM active_users)\nSELECT * FROM active_user_count",
+            (new SelectTransformer())->transform('SELECT * FROM active_user_count', $tables),
+        );
+    }
+
+    public function testUsesInjectedValueRenderer(): void
+    {
+        $valueRenderer = self::createStub(ValueRenderer::class);
+        $valueRenderer->method('renderValue')->willReturn('CUSTOM_VALUE');
+        $transformer = new SelectTransformer(null, null, $valueRenderer);
+        $tables = [
+            'users' => [
+                'rows' => [['id' => 1]],
+                'columns' => ['id'],
+                'columnTypes' => [],
+            ],
+        ];
+
+        self::assertStringContainsString('CUSTOM_VALUE', $transformer->transform('SELECT * FROM users', $tables));
+    }
+
     protected function createTransformer(): SqlTransformer
     {
         return new SelectTransformer();
@@ -48,6 +110,23 @@ final class SelectTransformerTest extends TransformerContractTest
         $sql = 'SELECT * FROM users';
         $result = $transformer->transform($sql, []);
         self::assertSame($sql, $result);
+    }
+
+    public function testTransformStripsIndexHintForMaterializedShadow(): void
+    {
+        $transformer = new SelectTransformer();
+        $tables = [
+            'products' => [
+                'rows' => [['id' => 1]],
+                'columns' => ['id'],
+                'columnTypes' => [],
+            ],
+        ];
+
+        $result = $transformer->transform('SELECT * FROM products INDEXED BY idx_products', $tables);
+
+        self::assertStringNotContainsString('INDEXED BY', $result);
+        self::assertStringContainsString('SELECT * FROM products ', $result);
     }
 
     public function testTransformWithEmptyRowsGeneratesEmptyCte(): void

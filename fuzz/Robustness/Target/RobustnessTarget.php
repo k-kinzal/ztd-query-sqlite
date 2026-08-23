@@ -181,6 +181,12 @@ final class RobustnessTarget
             fn () => $this->provider->createTableStatement(maxDepth: 5),
             fn () => $this->provider->alterTableStatement(maxDepth: 5),
             fn () => $this->provider->dropTableStatement(maxDepth: 3),
+            fn (): string => 'EXPLAIN QUERY PLAN SELECT * FROM users',
+            fn (): string => 'SELECT * FROM main.users',
+            fn (): string => 'SELECT * FROM users INDEXED BY idx_users',
+            fn (): string => 'SELECT * FROM users NOT INDEXED',
+            fn (): string => "ATTACH DATABASE ':memory:' AS fuzz_db",
+            fn (): string => $this->provider->fullTextSearchStatement(),
         ];
 
         $index = ord($input[0] ?? "\0") % count($generators);

@@ -54,4 +54,9 @@ final class SqliteTransformer implements SqlTransformer
             default => throw new UnsupportedSqlException($sql, 'Statement type not supported by transformer'),
         };
     }
+
+    public function commitRewriteState(): void
+    {
+        $this->insertTransformer->commitRewriteState();
+    }
 }

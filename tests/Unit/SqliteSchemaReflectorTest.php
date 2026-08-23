@@ -9,10 +9,47 @@ use ZtdQuery\Connection\ConnectionInterface;
 use ZtdQuery\Connection\StatementInterface;
 use ZtdQuery\Platform\Sqlite\SqliteSchemaReflector;
 use PHPUnit\Framework\Attributes\CoversClass;
+use PHPUnit\Framework\Attributes\UsesClass;
 
 #[CoversClass(SqliteSchemaReflector::class)]
+#[UsesClass(\ZtdQuery\Platform\Sqlite\SqliteSelectRelationParser::class)]
+#[UsesClass(\ZtdQuery\Platform\Sqlite\SqliteViewDefinitionParser::class)]
+#[UsesClass(\ZtdQuery\Platform\Sqlite\SqliteLexerProfile::class)]
 final class SqliteSchemaReflectorTest extends TestCase
 {
+    public function testReflectViewsReturnsEmptyWhenQueryFails(): void
+    {
+        $connection = self::createStub(ConnectionInterface::class);
+        $connection->method('query')->willReturn(false);
+
+        self::assertSame([], (new SqliteSchemaReflector($connection))->reflectViews());
+    }
+
+    public function testReflectViewsPrefersTemporaryAndSkipsMalformedRows(): void
+    {
+        $statement = self::createStub(StatementInterface::class);
+        $statement->method('fetchAll')->willReturn([
+            ['name' => null, 'sql' => 'CREATE VIEW ignored AS SELECT 1'],
+            ['name' => '', 'sql' => 'CREATE VIEW ignored AS SELECT 1'],
+            ['name' => 'non_string', 'sql' => null],
+            ['name' => 'invalid', 'sql' => 'CREATE VIEW invalid'],
+            ['name' => 'active_users', 'sql' => 'CREATE TEMP VIEW active_users AS SELECT * FROM temp.users'],
+            ['name' => 'active_users', 'sql' => 'CREATE VIEW active_users AS SELECT * FROM main.users'],
+            ['name' => 'all_users', 'sql' => 'CREATE VIEW all_users AS SELECT * FROM main.users'],
+        ]);
+        $connection = self::createMock(ConnectionInterface::class);
+        $connection->expects(self::once())->method('query')->with(
+            "SELECT name, sql FROM (SELECT name, sql, 0 AS precedence FROM sqlite_temp_master "
+            . "WHERE type='view' UNION ALL SELECT name, sql, 1 AS precedence FROM sqlite_master "
+            . "WHERE type='view') ORDER BY precedence, name",
+        )->willReturn($statement);
+
+        $definitions = (new SqliteSchemaReflector($connection))->reflectViews();
+
+        self::assertSame(['active_users', 'all_users'], array_keys($definitions));
+        self::assertSame('SELECT * FROM temp.users', $definitions['active_users']->query);
+    }
+
     public function testGetCreateStatementReturnsNullWhenQueryFails(): void
     {
         $connection = static::createStub(ConnectionInterface::class);
@@ -85,6 +122,28 @@ final class SqliteSchemaReflectorTest extends TestCase
         self::assertCount(2, $result);
         self::assertArrayHasKey('users', $result);
         self::assertArrayHasKey('orders', $result);
+    }
+
+    public function testReflectAllPrefersTemporaryTableWhenNamesCollide(): void
+    {
+        $statement = static::createStub(StatementInterface::class);
+        $statement->method('fetchAll')->willReturn([
+            ['name' => 'staging', 'sql' => 'CREATE TABLE staging (temporary_value TEXT)'],
+            ['name' => 'staging', 'sql' => 'CREATE TABLE staging (persistent_value TEXT)'],
+            ['name' => 'after', 'sql' => 'CREATE TABLE after (id INTEGER)'],
+        ]);
+        $connection = static::createMock(ConnectionInterface::class);
+        $connection->expects(self::once())->method('query')->with(
+            "SELECT name, sql FROM (SELECT name, sql, 0 AS precedence FROM sqlite_temp_master "
+            . "WHERE type='table' AND name NOT LIKE 'sqlite_%' UNION ALL "
+            . "SELECT name, sql, 1 AS precedence FROM sqlite_master "
+            . "WHERE type='table' AND name NOT LIKE 'sqlite_%') ORDER BY precedence, name",
+        )->willReturn($statement);
+
+        $result = (new SqliteSchemaReflector($connection))->reflectAll();
+
+        self::assertSame('CREATE TABLE staging (temporary_value TEXT)', $result['staging']);
+        self::assertSame('CREATE TABLE after (id INTEGER)', $result['after']);
     }
 
     public function testReflectAllSkipsInvalidRows(): void
@@ -237,8 +296,12 @@ final class SqliteSchemaReflectorTest extends TestCase
             ['sql' => "CREATE TABLE \"it's\" (id INTEGER)"],
         ]);
 
-        $connection = static::createStub(ConnectionInterface::class);
-        $connection->method('query')->willReturn($statement);
+        $connection = static::createMock(ConnectionInterface::class);
+        $connection->expects(self::once())->method('query')->with(
+            "SELECT sql FROM (SELECT sql, 0 AS precedence FROM sqlite_temp_master WHERE type='table' AND name='it''s' "
+            . "UNION ALL SELECT sql, 1 AS precedence FROM sqlite_master WHERE type='table' AND name='it''s') "
+            . 'ORDER BY precedence LIMIT 1',
+        )->willReturn($statement);
 
         $reflector = new SqliteSchemaReflector($connection);
         $result = $reflector->getCreateStatement("it's");

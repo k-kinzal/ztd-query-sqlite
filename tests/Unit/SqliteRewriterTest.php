@@ -7,6 +7,7 @@ namespace Tests\Unit;
 use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\Attributes\UsesClass;
 use Tests\Contract\RewriterContractTest;
+use ZtdQuery\Exception\UnknownSchemaException;
 use ZtdQuery\Exception\UnsupportedSqlException;
 use ZtdQuery\Platform\Sqlite\SqliteCastRenderer;
 use ZtdQuery\Platform\Sqlite\SqliteIdentifierQuoter;
@@ -14,8 +15,11 @@ use ZtdQuery\Platform\Sqlite\SqliteMutationResolver;
 use ZtdQuery\Platform\Sqlite\SqliteLexicalMasker;
 use ZtdQuery\Platform\Sqlite\SqliteParser;
 use ZtdQuery\Platform\Sqlite\SqliteQueryGuard;
+use ZtdQuery\Platform\Sqlite\SqliteReturningProjectionParser;
 use ZtdQuery\Platform\Sqlite\SqliteRewriter;
 use ZtdQuery\Platform\Sqlite\SqliteSchemaParser;
+use ZtdQuery\Platform\Sqlite\SqliteViewDefinitionParser;
+use ZtdQuery\Platform\Sqlite\Mutation\AlterTableMutation;
 use ZtdQuery\Platform\Sqlite\Transformer\DeleteTransformer;
 use ZtdQuery\Platform\Sqlite\Transformer\InsertTransformer;
 use ZtdQuery\Platform\Sqlite\Transformer\SelectTransformer;
@@ -24,6 +28,8 @@ use ZtdQuery\Platform\Sqlite\Transformer\UpdateTransformer;
 use ZtdQuery\Rewrite\QueryKind;
 use ZtdQuery\Schema\TableDefinition;
 use ZtdQuery\Schema\TableDefinitionRegistry;
+use ZtdQuery\Schema\ViewDefinition;
+use ZtdQuery\Schema\ViewDefinitionSet;
 use ZtdQuery\Shadow\Mutation\CreateTableMutation;
 use ZtdQuery\Shadow\Mutation\DeleteMutation;
 use ZtdQuery\Shadow\Mutation\DropTableMutation;
@@ -34,22 +40,168 @@ use ZtdQuery\Shadow\Mutation\UpsertMutation;
 use ZtdQuery\Platform\SchemaParser;
 use ZtdQuery\Rewrite\SqlRewriter;
 use ZtdQuery\Shadow\ShadowStore;
+use ZtdQuery\Shadow\ShadowTableState;
 
 #[CoversClass(SqliteRewriter::class)]
+#[UsesClass(\ZtdQuery\Platform\Sqlite\SqliteColumnTypeMapper::class)]
+#[UsesClass(\ZtdQuery\Platform\Sqlite\SqliteForeignKeyDefinitionParser::class)]
 #[UsesClass(SqliteLexicalMasker::class)]
 #[UsesClass(SqliteParser::class)]
+#[UsesClass(\ZtdQuery\Platform\Sqlite\SqliteUpsertExpressionParser::class)]
 #[UsesClass(SqliteQueryGuard::class)]
+#[UsesClass(\ZtdQuery\Platform\Sqlite\SqliteReadOnlyDiagnosticStatement::class)]
+#[UsesClass(\ZtdQuery\Platform\Sqlite\SqliteTransactionStatementParser::class)]
+#[UsesClass(SqliteReturningProjectionParser::class)]
+#[UsesClass(\ZtdQuery\Platform\Sqlite\SqliteInMemoryAttachStatement::class)]
 #[UsesClass(SqliteSchemaParser::class)]
+#[UsesClass(\ZtdQuery\Platform\Sqlite\SqliteSelectRelationParser::class)]
 #[UsesClass(SqliteMutationResolver::class)]
+#[UsesClass(AlterTableMutation::class)]
 #[UsesClass(SqliteTransformer::class)]
 #[UsesClass(SelectTransformer::class)]
+#[UsesClass(\ZtdQuery\Platform\Sqlite\SqliteFullTextSearchRewriter::class)]
+#[UsesClass(\ZtdQuery\Platform\Sqlite\SqliteIndexHintStripper::class)]
 #[UsesClass(InsertTransformer::class)]
+#[UsesClass(\ZtdQuery\Platform\Sqlite\Transformer\InsertRowRenderer::class)]
+#[UsesClass(\ZtdQuery\Platform\Sqlite\Transformer\InsertSelectRenderer::class)]
 #[UsesClass(UpdateTransformer::class)]
 #[UsesClass(DeleteTransformer::class)]
 #[UsesClass(SqliteCastRenderer::class)]
 #[UsesClass(SqliteIdentifierQuoter::class)]
+#[UsesClass(\ZtdQuery\Platform\Sqlite\SqliteValueRenderer::class)]
+#[UsesClass(\ZtdQuery\Platform\Sqlite\SqliteCteShadowComposer::class)]
+#[UsesClass(\ZtdQuery\Platform\Sqlite\SqliteNativeUpsertProjector::class)]
+#[UsesClass(\ZtdQuery\Platform\Sqlite\SqliteViewDefinitionParser::class)]
+#[UsesClass(\ZtdQuery\Platform\Sqlite\SqliteViewShadowRenderer::class)]
+#[UsesClass(\ZtdQuery\Platform\Sqlite\SqliteGeneratedColumnProjector::class)]
+#[UsesClass(\ZtdQuery\Platform\Sqlite\SqliteLexerProfile::class)]
 final class SqliteRewriterTest extends RewriterContractTest
 {
+    public function testGeneratedExpressionIsPresentBeforeTheFirstShadowWrite(): void
+    {
+        $store = new ShadowStore();
+        $registry = new TableDefinitionRegistry();
+        $definition = $this->createSchemaParser()->parse(
+            'CREATE TABLE orders (qty INTEGER, total INTEGER GENERATED ALWAYS AS (qty * 2) STORED)',
+        );
+        self::assertNotNull($definition);
+        $registry->register('orders', $definition);
+
+        $sql = $this->createRewriter($store, $registry)->rewrite('SELECT total FROM orders')->sql();
+
+        self::assertStringContainsString('(qty * 2) AS "total"', $sql);
+    }
+
+    public function testRegisteredViewIsKnownAndMaterialized(): void
+    {
+        $store = new ShadowStore();
+        $registry = new TableDefinitionRegistry();
+        $parser = new SqliteParser();
+        $schemaParser = new SqliteSchemaParser();
+        $definition = $schemaParser->parse($this->usersCreateTableSql());
+        self::assertNotNull($definition);
+        $registry->register('users', $definition);
+        $store->set('users', [['id' => 1, 'name' => 'Alice', 'email' => 'alice@example.com']]);
+        $selectTransformer = new SelectTransformer();
+        $insertTransformer = new InsertTransformer($parser, $selectTransformer);
+        $updateTransformer = new UpdateTransformer($parser, $selectTransformer);
+        $deleteTransformer = new DeleteTransformer($parser, $selectTransformer);
+        $transformer = new SqliteTransformer($parser, $selectTransformer, $insertTransformer, $updateTransformer, $deleteTransformer);
+        $resolver = new SqliteMutationResolver($store, $registry, $schemaParser, $parser);
+        $views = new ViewDefinitionSet();
+        $views->register('active_users', (new SqliteViewDefinitionParser())->fromQuery('SELECT id FROM main.users'));
+        $rewriter = new SqliteRewriter(new SqliteQueryGuard($parser), $store, $registry, $transformer, $resolver, $parser, $views);
+
+        $sql = $rewriter->rewrite('SELECT * FROM active_users')->sql();
+        self::assertStringStartsWith('WITH "users" AS', $sql);
+        self::assertStringContainsString('"active_users" AS (SELECT id FROM users)', $sql);
+
+        $viewOnlyStore = new ShadowStore();
+        $viewOnlyRegistry = new TableDefinitionRegistry();
+        $viewOnlyViews = new ViewDefinitionSet();
+        $viewOnlyViews->register('constant_view', (new SqliteViewDefinitionParser())->fromQuery('SELECT 1 AS id'));
+        $viewOnlyResolver = new SqliteMutationResolver($viewOnlyStore, $viewOnlyRegistry, $schemaParser, $parser);
+        $viewOnlyRewriter = new SqliteRewriter(new SqliteQueryGuard($parser), $viewOnlyStore, $viewOnlyRegistry, $transformer, $viewOnlyResolver, $parser, $viewOnlyViews);
+
+        $this->expectException(UnknownSchemaException::class);
+        $viewOnlyRewriter->rewrite('SELECT * FROM missing_table');
+    }
+
+    public function testCteReferencesAreMatchedCaseInsensitivelyDuringSchemaValidation(): void
+    {
+        $registry = new TableDefinitionRegistry();
+        $definition = $this->createSchemaParser()->parse('CREATE TABLE known_table (id INTEGER PRIMARY KEY)');
+        self::assertNotNull($definition);
+        $registry->register('known_table', $definition);
+
+        $plan = $this->createRewriter(new ShadowStore(), $registry)->rewrite(
+            'WITH users AS (SELECT 1 AS id) SELECT * FROM Users',
+        );
+
+        self::assertSame(QueryKind::READ, $plan->kind());
+    }
+
+    public function testUnknownTableAfterDeclaredCteIsRejected(): void
+    {
+        $registry = new TableDefinitionRegistry();
+        $definition = $this->createSchemaParser()->parse('CREATE TABLE known_table (id INTEGER PRIMARY KEY)');
+        self::assertNotNull($definition);
+        $registry->register('known_table', $definition);
+
+        $this->expectException(UnknownSchemaException::class);
+        $this->expectExceptionMessage('missing_table');
+
+        $this->createRewriter(new ShadowStore(), $registry)->rewrite(
+            'WITH users AS (SELECT 1 AS id) SELECT * FROM Users JOIN missing_table ON TRUE',
+        );
+    }
+
+    public function testInMemoryAttachPassesThroughUnchanged(): void
+    {
+        $rewriter = $this->createRewriter(new ShadowStore(), new TableDefinitionRegistry());
+        $sql = "ATTACH DATABASE ':memory:' AS db2";
+
+        $plan = $rewriter->rewrite($sql);
+
+        self::assertSame(QueryKind::READ, $plan->kind());
+        self::assertSame($sql, $plan->sql());
+    }
+
+    public function testPersistentAttachRemainsUnsupported(): void
+    {
+        $rewriter = $this->createRewriter(new ShadowStore(), new TableDefinitionRegistry());
+
+        $this->expectException(UnsupportedSqlException::class);
+
+        $rewriter->rewrite("ATTACH 'test.sqlite' AS db2");
+    }
+
+    public function testSchemaQualifiedSelectUsesShadowCte(): void
+    {
+        $store = new ShadowStore();
+        $store->set('users', [['id' => 1, 'name' => 'Alice', 'email' => 'alice@example.com']]);
+        $registry = new TableDefinitionRegistry();
+        $definition = $this->createSchemaParser()->parse($this->usersCreateTableSql());
+        self::assertNotNull($definition);
+        $registry->register('users', $definition);
+
+        $plan = $this->createRewriter($store, $registry)->rewrite('SELECT name FROM main.users');
+
+        self::assertStringStartsWith('WITH "users" AS', $plan->sql());
+        self::assertStringEndsWith('SELECT name FROM users', $plan->sql());
+    }
+
+    public function testReadOnlyDiagnosticsPassThroughUnchanged(): void
+    {
+        $rewriter = $this->createRewriter(new ShadowStore(), new TableDefinitionRegistry());
+        $sql = 'EXPLAIN QUERY PLAN SELECT * FROM users';
+
+        $plan = $rewriter->rewrite($sql);
+
+        self::assertSame(QueryKind::READ, $plan->kind());
+        self::assertSame($sql, $plan->sql());
+    }
+
     protected function createRewriter(ShadowStore $store, TableDefinitionRegistry $registry): SqlRewriter
     {
         $parser = new SqliteParser();
@@ -196,6 +348,7 @@ final class SqliteRewriterTest extends RewriterContractTest
         self::assertSame(QueryKind::WRITE_SIMULATED, $plan->kind());
         self::assertInstanceOf(UpdateMutation::class, $plan->mutation());
         self::assertSame('users', $plan->mutation()->tableName());
+        self::assertStringContainsString('"users"."id" AS "__ztd_original_id"', $plan->sql());
         self::assertMatchesRegularExpression('/^(?:WITH\b|SELECT\b)/i', $plan->sql());
     }
 
@@ -341,6 +494,8 @@ final class SqliteRewriterTest extends RewriterContractTest
 
         self::assertSame(QueryKind::WRITE_SIMULATED, $plan->kind());
         self::assertInstanceOf(UpsertMutation::class, $plan->mutation());
+        self::assertStringContainsString('__ztd_upsert_value_0', $plan->sql());
+        self::assertStringNotContainsString('excluded.', $plan->sql());
     }
 
     public function testCreateTableReturnsDdlSimulated(): void
@@ -535,6 +690,33 @@ final class SqliteRewriterTest extends RewriterContractTest
         self::assertInstanceOf(InsertMutation::class, $plan->mutation());
     }
 
+    public function testInsertUsesDefaultsFromRegistryWithoutShadowRows(): void
+    {
+        $definition = (new SqliteSchemaParser())->parse("CREATE TABLE settings (id INTEGER, label TEXT DEFAULT 'new')");
+        self::assertNotNull($definition);
+        $registry = new TableDefinitionRegistry();
+        $registry->register('settings', $definition);
+        $rewriter = $this->createRewriter(new ShadowStore(), $registry);
+
+        $plan = $rewriter->rewrite('INSERT INTO settings (id) VALUES (1)');
+
+        self::assertStringContainsString("'new'", $plan->sql());
+        self::assertStringContainsString('AS "label"', $plan->sql());
+    }
+
+    public function testInsertUsesIdentityStrategyFromRegistryWithoutShadowRows(): void
+    {
+        $definition = (new SqliteSchemaParser())->parse('CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)');
+        self::assertNotNull($definition);
+        $registry = new TableDefinitionRegistry();
+        $registry->register('users', $definition);
+        $rewriter = $this->createRewriter(new ShadowStore(), $registry);
+
+        $plan = $rewriter->rewrite("INSERT INTO users (name) VALUES ('Alice')");
+
+        self::assertStringContainsString('CAST(1 AS INTEGER) AS "id"', $plan->sql());
+    }
+
     public function testRewriteMultiple(): void
     {
         $registry = new TableDefinitionRegistry();
@@ -714,7 +896,7 @@ final class SqliteRewriterTest extends RewriterContractTest
         $rewriter = new SqliteRewriter($guard, $store, $registry, $transformer, $mutationResolver, $parser);
 
         $plan = $rewriter->rewrite('DELETE FROM users');
-        self::assertSame('SELECT 1 WHERE 0', $plan->sql());
+        self::assertStringContainsString('FROM "users"', $plan->sql());
     }
 
     public function testDdlSimulatedReturnsSqlSelectWhere0(): void
@@ -735,6 +917,47 @@ final class SqliteRewriterTest extends RewriterContractTest
         $plan = $rewriter->rewrite('CREATE TABLE t (id INTEGER PRIMARY KEY)');
         self::assertSame('SELECT 1 WHERE 0', $plan->sql());
         self::assertSame(QueryKind::DDL_SIMULATED, $plan->kind());
+    }
+
+    public function testAlterTableUsesShadowedMigrationSelect(): void
+    {
+        $registry = new TableDefinitionRegistry();
+        $registry->register('people', new TableDefinition(
+            ['id', 'name'],
+            ['id' => 'INTEGER', 'name' => 'TEXT'],
+            ['id'],
+            [],
+            [],
+        ));
+        $store = new ShadowStore();
+        $store->set('people', [['id' => 1, 'name' => 'Alice']]);
+        $rewriter = $this->createRewriter($store, $registry);
+
+        $plan = $rewriter->rewrite('ALTER TABLE people ADD COLUMN age INTEGER DEFAULT 7');
+
+        self::assertSame(QueryKind::DDL_SIMULATED, $plan->kind());
+        self::assertInstanceOf(AlterTableMutation::class, $plan->mutation());
+        self::assertStringContainsString('WITH "people" AS', $plan->sql());
+        self::assertStringContainsString('SELECT "id", "name", 7 AS "age" FROM "people"', $plan->sql());
+    }
+
+    public function testRemovedTableIsShadowedInsteadOfFallingThrough(): void
+    {
+        $registry = new TableDefinitionRegistry();
+        $registry->register('people', new TableDefinition(
+            ['id', 'name'],
+            ['id' => 'INTEGER', 'name' => 'TEXT'],
+            ['id'],
+            [],
+            [],
+        ));
+        $registry->markRemoved('people');
+        $rewriter = $this->createRewriter(new ShadowStore(), $registry);
+
+        $plan = $rewriter->rewrite('SELECT id, name FROM people');
+
+        self::assertStringContainsString('WITH "people" AS', $plan->sql());
+        self::assertStringContainsString('WHERE 0', $plan->sql());
     }
 
     public function testRewriteMultipleEmptyThrows(): void
@@ -1049,7 +1272,7 @@ final class SqliteRewriterTest extends RewriterContractTest
         $rewriter = new SqliteRewriter($guard, $store, $registry, $transformer, $mutationResolver, $parser);
 
         $plan = $rewriter->rewrite('DELETE FROM "my_table"');
-        self::assertSame('SELECT 1 WHERE 0', $plan->sql());
+        self::assertStringContainsString('FROM "my_table"', $plan->sql());
     }
 
     public function testDeleteFromWithSemicolonAndWhitespace(): void
@@ -1076,7 +1299,7 @@ final class SqliteRewriterTest extends RewriterContractTest
         $rewriter = new SqliteRewriter($guard, $store, $registry, $transformer, $mutationResolver, $parser);
 
         $plan = $rewriter->rewrite('DELETE FROM users ;');
-        self::assertSame('SELECT 1 WHERE 0', $plan->sql());
+        self::assertStringContainsString('FROM "users"', $plan->sql());
     }
 
     public function testUpdateEnsuresShadowStoreCalledOnTarget(): void
@@ -1224,7 +1447,7 @@ final class SqliteRewriterTest extends RewriterContractTest
         $rewriter = new SqliteRewriter($guard, $store, $registry, $transformer, $mutationResolver, $parser);
 
         $plan = $rewriter->rewrite('DELETE FROM `t`');
-        self::assertSame('SELECT 1 WHERE 0', $plan->sql());
+        self::assertStringContainsString('FROM "t"', $plan->sql());
     }
 
     public function testDeleteFromBracketQuotedTableReturnsSqlWhere0(): void
@@ -1251,7 +1474,7 @@ final class SqliteRewriterTest extends RewriterContractTest
         $rewriter = new SqliteRewriter($guard, $store, $registry, $transformer, $mutationResolver, $parser);
 
         $plan = $rewriter->rewrite('DELETE FROM [t]');
-        self::assertSame('SELECT 1 WHERE 0', $plan->sql());
+        self::assertStringContainsString('FROM "t"', $plan->sql());
     }
 
     public function testUpdateEnsuresShadowStoreForTargetTable(): void
@@ -1333,7 +1556,7 @@ final class SqliteRewriterTest extends RewriterContractTest
         $rewriter = new SqliteRewriter($guard, $store, $registry, $transformer, $mutationResolver, $parser);
 
         $plan = $rewriter->rewrite('delete from users');
-        self::assertSame('SELECT 1 WHERE 0', $plan->sql());
+        self::assertStringContainsString('FROM "users"', $plan->sql());
     }
 
     public function testBuildTableContextIncludesMultipleTablesFromRegistry(): void
@@ -1473,7 +1696,7 @@ final class SqliteRewriterTest extends RewriterContractTest
         $rewriter = new SqliteRewriter($guard, $store, $registry, $transformer, $mutationResolver, $parser);
 
         $plan = $rewriter->rewrite('/* comment */ DELETE FROM users');
-        self::assertSame('SELECT 1 WHERE 0', $plan->sql());
+        self::assertStringContainsString('FROM "users"', $plan->sql());
     }
 
     public function testSelectRewritesTableAfterBlockComment(): void
@@ -1664,5 +1887,19 @@ final class SqliteRewriterTest extends RewriterContractTest
         $sql = $plan->sql();
         self::assertStringContainsString('"users"', $sql);
         self::assertStringContainsString('"orders"', $sql);
+    }
+
+    public function testUpdateDoesNotPromoteMaterializedUnknownTable(): void
+    {
+        $store = new ShadowStore();
+        $store->insert('late_table', [['id' => 1, 'name' => 'Alice']]);
+        $rewriter = $this->createRewriter($store, new TableDefinitionRegistry());
+
+        try {
+            $rewriter->rewrite("UPDATE late_table SET name = 'Bob' WHERE id = 1");
+            self::fail('Expected an unknown schema exception.');
+        } catch (UnknownSchemaException) {
+            self::assertSame(ShadowTableState::Materialized, $store->state('late_table'));
+        }
     }
 }

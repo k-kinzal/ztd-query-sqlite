@@ -16,11 +16,18 @@ use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\Attributes\UsesClass;
 
 #[CoversClass(UpdateTransformer::class)]
+#[UsesClass(\ZtdQuery\Platform\Sqlite\SqliteSelectRelationParser::class)]
 #[UsesClass(SqliteLexicalMasker::class)]
 #[UsesClass(SqliteParser::class)]
 #[UsesClass(SelectTransformer::class)]
+#[UsesClass(\ZtdQuery\Platform\Sqlite\SqliteFullTextSearchRewriter::class)]
+#[UsesClass(\ZtdQuery\Platform\Sqlite\SqliteIndexHintStripper::class)]
 #[UsesClass(SqliteCastRenderer::class)]
+#[UsesClass(\ZtdQuery\Platform\Sqlite\SqliteValueRenderer::class)]
 #[UsesClass(SqliteIdentifierQuoter::class)]
+#[UsesClass(\ZtdQuery\Platform\Sqlite\SqliteCteShadowComposer::class)]
+#[UsesClass(\ZtdQuery\Platform\Sqlite\SqliteGeneratedColumnProjector::class)]
+#[UsesClass(\ZtdQuery\Platform\Sqlite\SqliteLexerProfile::class)]
 final class UpdateTransformerTest extends TestCase
 {
     public function testTransformSimpleUpdate(): void
@@ -34,6 +41,7 @@ final class UpdateTransformerTest extends TestCase
                 'rows' => [],
                 'columns' => ['id', 'name', 'email'],
                 'columnTypes' => [],
+                'primaryKeys' => ['id'],
             ],
         ];
 
@@ -43,6 +51,7 @@ final class UpdateTransformerTest extends TestCase
         self::assertStringContainsString("'Bob'", $result);
         self::assertStringContainsString('"name"', $result);
         self::assertStringContainsString('WHERE id = 1', $result);
+        self::assertStringContainsString('"users"."id" AS "__ztd_original_id"', $result);
     }
 
     public function testTransformUpdateWithMultipleAssignments(): void
@@ -166,6 +175,44 @@ final class UpdateTransformerTest extends TestCase
         self::assertStringContainsString("'Bob' AS \"name\"", $projection);
         self::assertStringContainsString("'bob@test.com' AS \"email\"", $projection);
         self::assertStringContainsString('"users"."id"', $projection);
+    }
+
+    public function testBuildProjectionPreservesAliasFromSourceAndIdentityQualifier(): void
+    {
+        $parser = new SqliteParser();
+        $selectTransformer = new SelectTransformer();
+        $transformer = new UpdateTransformer($parser, $selectTransformer);
+
+        $projection = $transformer->buildProjection(
+            'UPDATE users AS target SET name = source.name FROM incoming AS source WHERE target.id = source.id',
+            'users',
+            ['id', 'name'],
+            ['id'],
+        );
+
+        self::assertSame(
+            'SELECT source.name AS "name", "target"."id", "target"."id" AS "__ztd_original_id" FROM "users" AS "target", incoming AS source WHERE target.id = source.id',
+            $projection,
+        );
+    }
+
+    public function testBuildProjectionWithoutAliasOrFromHasNoExtraSourceSyntax(): void
+    {
+        $parser = new SqliteParser();
+        $selectTransformer = new SelectTransformer();
+        $transformer = new UpdateTransformer($parser, $selectTransformer);
+
+        $projection = $transformer->buildProjection(
+            "UPDATE users SET name = 'Bob' WHERE id = 1",
+            'users',
+            ['id', 'name'],
+            ['id'],
+        );
+
+        self::assertSame(
+            'SELECT \'Bob\' AS "name", "users"."id", "users"."id" AS "__ztd_original_id" FROM "users" WHERE id = 1',
+            $projection,
+        );
     }
 
     public function testBuildProjectionNoColumnsUsesStarFallback(): void

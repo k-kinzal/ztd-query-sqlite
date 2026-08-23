@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Fuzz\Robustness\Invariant;
 
 use Throwable;
+use ZtdQuery\Platform\Sqlite\SqliteIndexHintStripper;
 use ZtdQuery\Rewrite\QueryKind;
 use ZtdQuery\Rewrite\RewritePlan;
 use ZtdQuery\Rewrite\SqlRewriter;
@@ -58,6 +59,31 @@ final class RewritePlanConsistencyChecker implements InvariantChecker
                 'Rewritten SQL is empty',
                 $sql,
                 ['kind' => $kind->value]
+            );
+        }
+
+        $shadowTables = ['users', 'orders', 'order_items', 'products'];
+        $relationParser = new \ZtdQuery\Platform\Sqlite\SqliteSelectRelationParser();
+        $normalizedInput = $relationParser->unqualify($sql, $shadowTables);
+        $normalizedPlan = $relationParser->unqualify($plan->sql(), $shadowTables);
+        if ($normalizedInput !== $sql && $normalizedPlan !== $plan->sql()) {
+            return new InvariantViolation(
+                'INV-L2-07',
+                'schema-qualified shadow source survived rewrite',
+                $sql,
+                ['rewrite_sql' => $plan->sql()]
+            );
+        }
+
+        $hintStripper = new SqliteIndexHintStripper();
+        $strippedInput = $hintStripper->strip($sql, $shadowTables);
+        $strippedPlan = $hintStripper->strip($plan->sql(), $shadowTables);
+        if ($strippedInput !== $sql && $strippedPlan !== $plan->sql()) {
+            return new InvariantViolation(
+                'INV-L2-08',
+                'shadow source index hint survived rewrite',
+                $sql,
+                ['rewrite_sql' => $plan->sql()]
             );
         }
 

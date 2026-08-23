@@ -6,6 +6,7 @@ namespace ZtdQuery\Platform\Sqlite\Transformer;
 
 use ZtdQuery\Exception\UnsupportedSqlException;
 use ZtdQuery\Platform\Sqlite\SqliteParser;
+use ZtdQuery\Platform\Sqlite\SqliteCteShadowComposer;
 use ZtdQuery\Rewrite\SqlTransformer;
 
 /**
@@ -17,11 +18,15 @@ final class DeleteTransformer implements SqlTransformer
 {
     private SqliteParser $parser;
     private SelectTransformer $selectTransformer;
+    private SqliteCteShadowComposer $cteComposer;
 
-    public function __construct(SqliteParser $parser, SelectTransformer $selectTransformer)
-    {
+    public function __construct(
+        SqliteParser $parser,
+        SelectTransformer $selectTransformer,
+    ) {
         $this->parser = $parser;
         $this->selectTransformer = $selectTransformer;
+        $this->cteComposer = new SqliteCteShadowComposer();
     }
 
     /**
@@ -43,7 +48,10 @@ final class DeleteTransformer implements SqlTransformer
 
         $projection = $this->buildProjection($sql, $targetTable, $columns);
 
-        return $this->selectTransformer->transform($projection, $tables);
+        return $this->selectTransformer->transform(
+            $this->cteComposer->carryPrefix($sql, $projection),
+            $tables,
+        );
     }
 
     /**

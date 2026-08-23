@@ -6,23 +6,79 @@ namespace Tests\Unit\Transformer;
 
 use PHPUnit\Framework\TestCase;
 use ZtdQuery\Exception\UnsupportedSqlException;
+use ZtdQuery\Platform\CastRenderer;
 use ZtdQuery\Platform\Sqlite\SqliteLexicalMasker;
 use ZtdQuery\Platform\Sqlite\SqliteParser;
+use ZtdQuery\Platform\Sqlite\Transformer\InsertSelectRenderer;
 use ZtdQuery\Platform\Sqlite\Transformer\InsertTransformer;
 use ZtdQuery\Platform\Sqlite\Transformer\SelectTransformer;
 use ZtdQuery\Platform\Sqlite\SqliteCastRenderer;
 use ZtdQuery\Platform\Sqlite\SqliteIdentifierQuoter;
 use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\Attributes\UsesClass;
+use ZtdQuery\Schema\ColumnType;
+use ZtdQuery\Schema\ColumnTypeFamily;
+use ZtdQuery\Schema\IdentityGenerationStrategy;
 
 #[CoversClass(InsertTransformer::class)]
+#[UsesClass(\ZtdQuery\Platform\Sqlite\SqliteSelectRelationParser::class)]
 #[UsesClass(SqliteLexicalMasker::class)]
 #[UsesClass(SqliteParser::class)]
 #[UsesClass(SelectTransformer::class)]
+#[UsesClass(\ZtdQuery\Platform\Sqlite\SqliteFullTextSearchRewriter::class)]
+#[UsesClass(\ZtdQuery\Platform\Sqlite\SqliteIndexHintStripper::class)]
 #[UsesClass(SqliteCastRenderer::class)]
+#[UsesClass(\ZtdQuery\Platform\Sqlite\SqliteValueRenderer::class)]
 #[UsesClass(SqliteIdentifierQuoter::class)]
+#[UsesClass(\ZtdQuery\Platform\Sqlite\Transformer\InsertRowRenderer::class)]
+#[UsesClass(InsertSelectRenderer::class)]
+#[UsesClass(\ZtdQuery\Platform\Sqlite\SqliteCteShadowComposer::class)]
+#[UsesClass(\ZtdQuery\Platform\Sqlite\SqliteNativeUpsertProjector::class)]
+#[UsesClass(\ZtdQuery\Platform\Sqlite\SqliteGeneratedColumnProjector::class)]
+#[UsesClass(\ZtdQuery\Platform\Sqlite\SqliteLexerProfile::class)]
 final class InsertTransformerTest extends TestCase
 {
+    public function testProjectsConflictExpressionUsingCandidateKeys(): void
+    {
+        $transformer = new InsertTransformer(new SqliteParser(), new SelectTransformer());
+        $tables = [
+            'users' => [
+                'rows' => [],
+                'columns' => ['id', 'name'],
+                'columnTypes' => [],
+                'candidateKeys' => ['PRIMARY' => ['id']],
+            ],
+        ];
+
+        $result = $transformer->transform(
+            "INSERT INTO users (id, name) VALUES (1, 'Alice') ON CONFLICT (id) DO UPDATE SET name = excluded.name",
+            $tables,
+        );
+
+        self::assertStringContainsString('"__ztd_incoming"."name"', $result);
+        self::assertStringContainsString('__ztd_upsert_value_0', $result);
+        self::assertStringNotContainsString('excluded.', $result);
+    }
+
+    public function testUsesInjectedCastRendererAndColumnTypes(): void
+    {
+        $castRenderer = self::createStub(CastRenderer::class);
+        $castRenderer->method('renderCast')->willReturn('CUSTOM_CAST');
+        $transformer = new InsertTransformer(new SqliteParser(), new SelectTransformer(), $castRenderer);
+        $tables = [
+            'users' => [
+                'rows' => [],
+                'columns' => ['id'],
+                'columnTypes' => ['id' => new ColumnType(ColumnTypeFamily::INTEGER, 'INTEGER')],
+            ],
+        ];
+
+        self::assertStringContainsString(
+            'SELECT CUSTOM_CAST AS "id"',
+            $transformer->transform('INSERT INTO users (id) VALUES (1)', $tables),
+        );
+    }
+
     public function testTransformInsertValues(): void
     {
         $parser = new SqliteParser();
@@ -119,6 +175,23 @@ final class InsertTransformerTest extends TestCase
         self::assertStringContainsString('"name"', $result);
     }
 
+    public function testTransformInsertSelectUsesExplicitTargetColumnsForProjectionAndIdentity(): void
+    {
+        $transformer = new InsertTransformer(new SqliteParser(), new SelectTransformer());
+        $tables = ['archive' => [
+            'rows' => [],
+            'columns' => ['id', 'name', 'status'],
+            'columnTypes' => [],
+            'identityStrategies' => ['id' => IdentityGenerationStrategy::MaxValue],
+        ]];
+
+        $result = $transformer->transform('INSERT INTO archive (name) SELECT name FROM users', $tables);
+
+        self::assertStringContainsString('1 + ROW_NUMBER() OVER () - 1 AS "id"', $result);
+        self::assertStringContainsString('"__ztd_insert_0" AS "name"', $result);
+        self::assertStringContainsString('NULL AS "status"', $result);
+    }
+
     public function testTransformWithoutTableThrows(): void
     {
         $parser = new SqliteParser();
@@ -150,6 +223,7 @@ final class InsertTransformerTest extends TestCase
         $sql = "INSERT INTO users (id, name, email) VALUES (1, 'Alice')";
 
         $this->expectException(\RuntimeException::class);
+        $this->expectExceptionCode(0);
         $transformer->transform($sql, []);
     }
 
@@ -324,5 +398,121 @@ final class InsertTransformerTest extends TestCase
         $sql = "INSERT INTO t (a) VALUES (1)";
         $result = $transformer->transform($sql, []);
         self::assertStringStartsWith('SELECT ', $result);
+    }
+
+    public function testTransformProjectsOmittedAndExplicitDefaults(): void
+    {
+        $transformer = new InsertTransformer(new SqliteParser(), new SelectTransformer());
+        $tables = ['users' => [
+            'rows' => [],
+            'columns' => ['id', 'status', 'note'],
+            'columnTypes' => [],
+            'columnDefaults' => ['status' => "'active'"],
+        ]];
+
+        $result = $transformer->transform('INSERT INTO users (id, status) VALUES (1, DEFAULT)', $tables);
+
+        self::assertStringContainsString('1 AS "id"', $result);
+        self::assertStringContainsString("'active' AS \"status\"", $result);
+        self::assertStringContainsString('NULL AS "note"', $result);
+    }
+
+    public function testTransformDefaultValuesProjectsCompleteRow(): void
+    {
+        $transformer = new InsertTransformer(new SqliteParser(), new SelectTransformer());
+        $tables = ['settings' => [
+            'rows' => [],
+            'columns' => ['enabled', 'label'],
+            'columnTypes' => [],
+            'columnDefaults' => ['enabled' => '1', 'label' => "'new'"],
+        ]];
+
+        $result = $transformer->transform('INSERT INTO settings DEFAULT VALUES', $tables);
+
+        self::assertStringContainsString('1 AS "enabled"', $result);
+        self::assertStringContainsString("'new' AS \"label\"", $result);
+    }
+
+    public function testTransformNormalizesSparseTableColumnKeys(): void
+    {
+        $transformer = new InsertTransformer(new SqliteParser(), new SelectTransformer());
+        $tables = ['users' => [
+            'rows' => [],
+            'columns' => [2 => 'id', 5 => 'name'],
+            'columnTypes' => [],
+        ]];
+
+        $result = $transformer->transform("INSERT INTO users (id, name) VALUES (1, 'Alice')", $tables);
+
+        self::assertStringContainsString('1 AS "id"', $result);
+        self::assertStringContainsString("'Alice' AS \"name\"", $result);
+    }
+
+    public function testTransformAllocatesRowidValuesMonotonically(): void
+    {
+        $transformer = new InsertTransformer(new SqliteParser(), new SelectTransformer());
+        $tables = ['users' => [
+            'rows' => [],
+            'columns' => ['id', 'name'],
+            'columnTypes' => [],
+            'identityStrategies' => ['id' => IdentityGenerationStrategy::MaxValue],
+        ]];
+
+        $first = $transformer->transform("INSERT INTO users (name) VALUES ('Alice'), ('Bob')", $tables);
+        $transformer->commitRewriteState();
+        $second = $transformer->transform("INSERT INTO users (name) VALUES ('Carol')", $tables);
+
+        self::assertStringContainsString('1 AS "id"', $first);
+        self::assertStringContainsString('2 AS "id"', $first);
+        self::assertStringContainsString('3 AS "id"', $second);
+    }
+
+    public function testUncommittedTransformDoesNotConsumeRowidValue(): void
+    {
+        $transformer = new InsertTransformer(new SqliteParser(), new SelectTransformer());
+        $tables = ['users' => [
+            'rows' => [],
+            'columns' => ['id', 'name'],
+            'columnTypes' => [],
+            'identityStrategies' => ['id' => IdentityGenerationStrategy::MaxValue],
+        ]];
+
+        $preview = $transformer->transform("INSERT INTO users (name) VALUES ('preview')", $tables);
+        $executed = $transformer->transform("INSERT INTO users (name) VALUES ('executed')", $tables);
+
+        self::assertStringContainsString('1 AS "id"', $preview);
+        self::assertStringContainsString('1 AS "id"', $executed);
+    }
+
+    public function testTransformAllocatesRowidAfterExistingRows(): void
+    {
+        $transformer = new InsertTransformer(new SqliteParser(), new SelectTransformer());
+        $tables = ['users' => [
+            'rows' => [['id' => 7, 'name' => 'Existing']],
+            'columns' => ['id', 'name'],
+            'columnTypes' => [],
+            'identityStrategies' => ['id' => IdentityGenerationStrategy::MaxValue],
+        ]];
+
+        $result = $transformer->transform("INSERT INTO users (name) VALUES ('Alice')", $tables);
+
+        self::assertStringContainsString('8 AS "id"', $result);
+    }
+
+    public function testExplicitIdentityDoesNotConsumeGeneratedIdentity(): void
+    {
+        $transformer = new InsertTransformer(new SqliteParser(), new SelectTransformer());
+        $tables = ['users' => [
+            'rows' => [],
+            'columns' => ['id', 'name'],
+            'columnTypes' => [],
+            'identityStrategies' => ['id' => IdentityGenerationStrategy::MaxValue],
+        ]];
+
+        $transformer->transform("INSERT INTO users (id, name) VALUES (42, 'explicit')", $tables);
+        $transformer->commitRewriteState();
+        $generated = $transformer->transform("INSERT INTO users (name) VALUES ('generated')", $tables);
+
+        self::assertStringContainsString('1 AS "id"', $generated);
     }
 }

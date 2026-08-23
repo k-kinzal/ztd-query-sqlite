@@ -6,9 +6,13 @@ namespace ZtdQuery\Platform\Sqlite\Transformer;
 
 use ZtdQuery\Platform\Sqlite\SqliteCastRenderer;
 use ZtdQuery\Platform\Sqlite\SqliteIdentifierQuoter;
-use ZtdQuery\Platform\Sqlite\SqliteParser;
+use ZtdQuery\Platform\Sqlite\SqliteIndexHintStripper;
+use ZtdQuery\Platform\Sqlite\SqliteFullTextSearchRewriter;
 use ZtdQuery\Platform\CastRenderer;
 use ZtdQuery\Platform\IdentifierQuoter;
+use ZtdQuery\Platform\ValueRenderer;
+use ZtdQuery\Platform\Sqlite\SqliteCteShadowComposer;
+use ZtdQuery\Platform\Sqlite\SqliteGeneratedColumnProjector;
 use ZtdQuery\Rewrite\SqlTransformer;
 use ZtdQuery\Schema\ColumnType;
 use ZtdQuery\Schema\ColumnTypeFamily;
@@ -23,13 +27,24 @@ final class SelectTransformer implements SqlTransformer
 {
     private CastRenderer $castRenderer;
     private IdentifierQuoter $quoter;
-    private SqliteParser $parser;
+    private ValueRenderer $valueRenderer;
+    private SqliteCteShadowComposer $cteComposer;
+    private SqliteIndexHintStripper $indexHintStripper;
+    private SqliteGeneratedColumnProjector $generatedColumnProjector;
+    private SqliteFullTextSearchRewriter $fullTextSearchRewriter;
 
-    public function __construct(?CastRenderer $castRenderer = null, ?IdentifierQuoter $quoter = null)
-    {
+    public function __construct(
+        ?CastRenderer $castRenderer = null,
+        ?IdentifierQuoter $quoter = null,
+        ?ValueRenderer $valueRenderer = null,
+    ) {
         $this->castRenderer = $castRenderer ?? new SqliteCastRenderer();
         $this->quoter = $quoter ?? new SqliteIdentifierQuoter();
-        $this->parser = new SqliteParser();
+        $this->valueRenderer = $valueRenderer ?? new \ZtdQuery\Platform\Sqlite\SqliteValueRenderer($this->castRenderer);
+        $this->cteComposer = new SqliteCteShadowComposer();
+        $this->indexHintStripper = new SqliteIndexHintStripper();
+        $this->generatedColumnProjector = new SqliteGeneratedColumnProjector();
+        $this->fullTextSearchRewriter = new SqliteFullTextSearchRewriter();
     }
 
     /**
@@ -37,16 +52,18 @@ final class SelectTransformer implements SqlTransformer
      */
     public function transform(string $sql, array $tables): string
     {
-        $searchableSql = $this->parser->maskStringLiterals($this->parser->stripComments($sql));
+        $sql = $this->fullTextSearchRewriter->rewrite($sql, $tables);
         $ctes = [];
         foreach ($tables as $tableName => $tableContext) {
-            if (stripos($searchableSql, $tableName) === false) {
+            if (isset($tableContext['viewSql'])) {
+                $ctes[$tableName] = $this->quoter->quote($tableName) . " AS ({$tableContext['viewSql']})";
                 continue;
             }
 
             $rows = $tableContext['rows'];
             $columns = $tableContext['columns'];
             $columnTypes = $tableContext['columnTypes'];
+            $generatedExpressions = $tableContext['generatedExpressions'] ?? [];
 
             if ($columns === [] && $rows !== []) {
                 $columns = array_keys($rows[0]);
@@ -63,20 +80,18 @@ final class SelectTransformer implements SqlTransformer
                 continue;
             }
 
-            $ctes[] = $this->generateCte($tableName, $rows, $columns, $columnTypes);
+            $ctes[$tableName] = $this->generateCte(
+                $tableName,
+                $rows,
+                $columns,
+                $columnTypes,
+                $generatedExpressions,
+            );
         }
 
-        if ($ctes === []) {
-            return $sql;
-        }
+        $sql = $this->indexHintStripper->strip($sql, array_keys($ctes));
 
-        $cteString = implode(",\n", $ctes);
-        $pattern = '/^(\s*(?:(?:\/\*.*?\*\/)|(?:--.*?\n)|(?:#.*?\n)|\s)*)WITH\b/is';
-        if (preg_match($pattern, $sql) === 1) {
-            return (string) preg_replace($pattern, '$1WITH ' . $cteString . ",\n", $sql, 1);
-        }
-
-        return "WITH $cteString\n$sql";
+        return $this->cteComposer->compose($sql, $ctes);
     }
 
     /**
@@ -86,12 +101,14 @@ final class SelectTransformer implements SqlTransformer
      * @param array<int, array<string, mixed>> $rows
      * @param array<int, string> $columns
      * @param array<string, ColumnType> $columnTypes
+     * @param array<string, string> $generatedExpressions
      */
     private function generateCte(
         string $tableName,
         array $rows,
         array $columns,
-        array $columnTypes
+        array $columnTypes,
+        array $generatedExpressions,
     ): string {
         $quotedTable = $this->quoter->quote($tableName);
 
@@ -106,7 +123,12 @@ final class SelectTransformer implements SqlTransformer
                     $selects[] = "$nullCast AS " . $this->quoter->quote($col);
                 }
 
-                return "$quotedTable AS (SELECT " . implode(', ', $selects) . ' WHERE 0)';
+                return $this->wrapCte(
+                    $quotedTable,
+                    'SELECT ' . implode(', ', $selects) . ' WHERE 0',
+                    $columns,
+                    $generatedExpressions,
+                );
             }
 
             $ctes = [];
@@ -122,7 +144,7 @@ final class SelectTransformer implements SqlTransformer
 
             $union = implode(' UNION ALL ', $ctes);
 
-            return "$quotedTable AS ($union)";
+            return $this->wrapCte($quotedTable, $union, $columns, $generatedExpressions);
         }
 
         if ($rows === []) {
@@ -143,49 +165,27 @@ final class SelectTransformer implements SqlTransformer
 
         $union = implode(' UNION ALL ', $ctes);
 
-        return "$quotedTable AS ($union)";
+        return $this->wrapCte($quotedTable, $union, array_keys($rows[0]), $generatedExpressions);
+    }
+
+    /**
+     * @param array<int, string> $columns
+     * @param array<string, string> $generatedExpressions
+     */
+    private function wrapCte(
+        string $quotedTable,
+        string $baseSql,
+        array $columns,
+        array $generatedExpressions,
+    ): string {
+        $sql = $this->generatedColumnProjector->project($baseSql, $columns, $generatedExpressions);
+
+        return "$quotedTable AS ($sql)";
     }
 
     private function formatValue(mixed $val, ?ColumnType $type = null): string
     {
-        if (is_null($val)) {
-            return 'NULL';
-        }
-
-        if ($type !== null) {
-            if (is_string($val)) {
-                $quotedVal = $this->quoteValue($val);
-            } elseif (is_int($val) || is_float($val) || is_bool($val)) {
-                $quotedVal = $this->quoteValue((string) $val);
-            } else {
-                $quotedVal = $this->quoteValue(serialize($val));
-            }
-
-            return $this->castRenderer->renderCast($quotedVal, $type);
-        }
-
-        if (is_int($val)) {
-            return $this->castRenderer->renderCast(
-                (string) $val,
-                new ColumnType(ColumnTypeFamily::INTEGER, 'INTEGER'),
-            );
-        }
-        if (is_string($val)) {
-            return $this->castRenderer->renderCast(
-                $this->quoteValue($val),
-                new ColumnType(ColumnTypeFamily::TEXT, 'TEXT'),
-            );
-        }
-        if (is_bool($val)) {
-            return $val ? '1' : '0';
-        }
-        if (is_float($val)) {
-            return (string) $val;
-        }
-        if (is_object($val) && method_exists($val, '__toString')) {
-            return (string) $val;
-        }
-        throw new \RuntimeException('Unsupported value type for CTE shadowing.');
+        return $this->valueRenderer->renderValue($val, $type);
     }
 
     private function renderFallbackNullCast(): string
@@ -195,8 +195,4 @@ final class SelectTransformer implements SqlTransformer
         );
     }
 
-    private function quoteValue(string $val): string
-    {
-        return "'" . str_replace("'", "''", $val) . "'";
-    }
 }

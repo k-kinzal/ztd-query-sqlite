@@ -4,150 +4,81 @@ declare(strict_types=1);
 
 namespace Fuzz\Robustness\Target;
 
-use Faker\Generator;
-use Fuzz\Robustness\Invariant\ClassifyDeterministicChecker;
-use Fuzz\Robustness\Invariant\ClassifyNeverThrowsChecker;
-use Fuzz\Robustness\Invariant\ClassifyRewriteAgreementChecker;
-use Fuzz\Robustness\Invariant\InvariantChecker;
-use Fuzz\Robustness\Invariant\RewriteExceptionTypeChecker;
-use Fuzz\Robustness\Invariant\RewritePlanConsistencyChecker;
-use SqlFaker\SqliteProvider;
-use ZtdQuery\Platform\Sqlite\SqliteMutationResolver;
-use ZtdQuery\Platform\Sqlite\SqliteParser;
-use ZtdQuery\Platform\Sqlite\SqliteQueryGuard;
-use ZtdQuery\Platform\Sqlite\SqliteRewriter;
-use ZtdQuery\Platform\Sqlite\SqliteSchemaParser;
-use ZtdQuery\Platform\Sqlite\Transformer\DeleteTransformer;
-use ZtdQuery\Platform\Sqlite\Transformer\InsertTransformer;
-use ZtdQuery\Platform\Sqlite\Transformer\SelectTransformer;
-use ZtdQuery\Platform\Sqlite\Transformer\SqliteTransformer;
-use ZtdQuery\Platform\Sqlite\Transformer\UpdateTransformer;
+use ZtdQuery\Platform\Sqlite\Rewrite\SqliteQueryGuard;
+use ZtdQuery\Platform\Sqlite\Rewrite\SqliteRewriter;
+use ZtdQuery\Platform\Sqlite\Rewrite\Transformer\DeleteTransformer;
+use ZtdQuery\Platform\Sqlite\Rewrite\Transformer\InsertTransformer;
+use ZtdQuery\Platform\Sqlite\Rewrite\Transformer\SelectTransformer;
+use ZtdQuery\Platform\Sqlite\Rewrite\Transformer\SqliteTransformer;
+use ZtdQuery\Platform\Sqlite\Rewrite\Transformer\UpdateTransformer;
+use ZtdQuery\Platform\Sqlite\Schema\SqliteSchemaParser;
+use ZtdQuery\Platform\Sqlite\Shadow\SqliteMutationResolver;
+use ZtdQuery\Platform\Sqlite\Sql\SqliteIdentifierQuoter;
+use ZtdQuery\Platform\Sqlite\Sql\SqliteParser;
+use ZtdQuery\Platform\Sqlite\Sql\Value\SqliteCastRenderer;
 use ZtdQuery\Schema\TableDefinitionRegistry;
 use ZtdQuery\Shadow\ShadowStore;
 
+/**
+ * Verifies each rewrite once against a fresh schema registry and shadow store.
+ */
 final class RewriteTarget
 {
-    private Generator $faker;
-    private SqliteProvider $provider;
-    private SqliteRewriter $rewriter;
-    /** @var array<int, InvariantChecker> */
-    private array $checkers;
-
-    public function __construct(Generator $faker, SqliteProvider $provider)
+    /**
+     * Discards all rewrite and mutation state after this input, including on failure.
+     */
+    public function __invoke(string $sql): void
     {
-        $this->faker = $faker;
-        $this->provider = $provider;
-
-        $parser = new SqliteParser();
-        $schemaParser = new SqliteSchemaParser();
-        $guard = new SqliteQueryGuard($parser);
-        $shadowStore = new ShadowStore();
+        $store = new ShadowStore();
         $registry = new TableDefinitionRegistry();
-
-        $this->registerFixtureSchemas($registry, $schemaParser);
-        $this->populateFixtureData($shadowStore);
-
-        $selectTransformer = new SelectTransformer();
-        $insertTransformer = new InsertTransformer($parser, $selectTransformer);
-        $updateTransformer = new UpdateTransformer($parser, $selectTransformer);
-        $deleteTransformer = new DeleteTransformer($parser, $selectTransformer);
-        $transformer = new SqliteTransformer($parser, $selectTransformer, $insertTransformer, $updateTransformer, $deleteTransformer);
-        $mutationResolver = new SqliteMutationResolver($shadowStore, $registry, $schemaParser, $parser);
-        $this->rewriter = new SqliteRewriter($guard, $shadowStore, $registry, $transformer, $mutationResolver, $parser);
-
-        $this->checkers = [
-            new ClassifyNeverThrowsChecker($guard),
-            new ClassifyDeterministicChecker($guard),
-            new RewriteExceptionTypeChecker($this->rewriter),
-            new RewritePlanConsistencyChecker($this->rewriter),
-            new ClassifyRewriteAgreementChecker($guard, $this->rewriter),
-        ];
-    }
-
-    public function __invoke(string $input): void
-    {
-        $seed = crc32(str_pad($input, 4, "\0"));
-        $this->faker->seed($seed);
-
-        $sql = $this->selectGenerator($input)();
-
-        foreach ($this->checkers as $checker) {
-            $violation = $checker->check($sql);
-            if ($violation !== null) {
-                throw new \Error("Invariant violation: seed=$seed\n$violation");
-            }
-        }
-
-        $batch = $this->provider->multiDmlStatement();
-        $statements = $this->rewriter->splitStatements($batch);
-        $plans = $this->rewriter->rewriteMultiple($batch);
-        if (count($statements) !== 2 || $plans->count() !== 2) {
-            throw new \Error("Invariant violation: seed=$seed\nMulti-statement DML batch was not split into two plans: $batch");
-        }
-    }
-
-    private function registerFixtureSchemas(TableDefinitionRegistry $registry, SqliteSchemaParser $schemaParser): void
-    {
+        $schemaParser = new SqliteSchemaParser();
         $schemas = [
             'users' => 'CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT NOT NULL, email TEXT, status TEXT)',
             'orders' => 'CREATE TABLE orders (id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL, amount REAL, created_at TEXT)',
             'order_items' => 'CREATE TABLE order_items (order_id INTEGER NOT NULL, product_id INTEGER NOT NULL, quantity INTEGER NOT NULL DEFAULT 1, PRIMARY KEY (order_id, product_id))',
             'products' => 'CREATE TABLE products (id INTEGER PRIMARY KEY, name TEXT NOT NULL, price REAL, category TEXT)',
         ];
-
-        foreach ($schemas as $tableName => $createSql) {
-            $definition = $schemaParser->parse($createSql);
+        foreach ($schemas as $table => $sqlSchema) {
+            $definition = $schemaParser->parse($sqlSchema);
             if ($definition !== null) {
-                $registry->register($tableName, $definition);
+                $registry->register($table, $definition);
             }
         }
-    }
-
-    private function populateFixtureData(ShadowStore $store): void
-    {
-        $store->set('users', [
-            ['id' => '1', 'name' => 'Alice', 'email' => 'alice@example.com', 'status' => 'active'],
-            ['id' => '2', 'name' => 'Bob', 'email' => 'bob@example.com', 'status' => 'pending'],
-            ['id' => '3', 'name' => 'Charlie', 'email' => null, 'status' => 'active'],
-        ]);
-        $store->set('orders', [
-            ['id' => '1', 'user_id' => '1', 'amount' => '100.00', 'created_at' => '2024-01-01 00:00:00'],
-            ['id' => '2', 'user_id' => '2', 'amount' => '250.50', 'created_at' => '2024-01-02 12:30:00'],
-        ]);
-        $store->set('order_items', [
-            ['order_id' => '1', 'product_id' => '1', 'quantity' => '2'],
-            ['order_id' => '1', 'product_id' => '2', 'quantity' => '1'],
-            ['order_id' => '2', 'product_id' => '1', 'quantity' => '3'],
-        ]);
-        $store->set('products', [
-            ['id' => '1', 'name' => 'Widget', 'price' => '19.99', 'category' => 'tools'],
-            ['id' => '2', 'name' => 'Gadget', 'price' => '49.99', 'category' => 'electronics'],
-        ]);
-    }
-
-    /**
-     * @return callable(): string
-     */
-    private function selectGenerator(string $input): callable
-    {
-        $generators = [
-            fn () => $this->provider->sql(maxDepth: 8),
-            fn () => $this->provider->selectStatement(maxDepth: 8),
-            fn () => $this->provider->insertStatement(maxDepth: 8),
-            fn () => $this->provider->updateStatement(maxDepth: 8),
-            fn () => $this->provider->deleteStatement(maxDepth: 8),
-            fn () => $this->provider->createTableStatement(maxDepth: 5),
-            fn () => $this->provider->alterTableStatement(maxDepth: 5),
-            fn () => $this->provider->dropTableStatement(maxDepth: 3),
-            fn (): string => $this->provider->insertFunctionUpsertStatement(),
-            fn (): string => $this->provider->temporaryTableStatement(),
-            fn (): string => $this->provider->viewStatement(),
-            fn (): string => $this->provider->generatedColumnStatement(),
-            fn (): string => $this->provider->foreignKeyCascadeStatement(),
-            fn (): string => $this->provider->fullTextSearchStatement(),
+        $fixtureRows = [
+            'users' => [
+                ['id' => '1', 'name' => 'Alice', 'email' => 'alice@example.com', 'status' => 'active'],
+                ['id' => '2', 'name' => 'Bob', 'email' => 'bob@example.com', 'status' => 'pending'],
+                ['id' => '3', 'name' => 'Charlie', 'email' => null, 'status' => 'active'],
+            ],
+            'orders' => [
+                ['id' => '1', 'user_id' => '1', 'amount' => '100.00', 'created_at' => '2024-01-01 00:00:00'],
+                ['id' => '2', 'user_id' => '2', 'amount' => '250.50', 'created_at' => '2024-01-02 12:30:00'],
+            ],
+            'order_items' => [
+                ['order_id' => '1', 'product_id' => '1', 'quantity' => '2'],
+                ['order_id' => '1', 'product_id' => '2', 'quantity' => '1'],
+                ['order_id' => '2', 'product_id' => '1', 'quantity' => '3'],
+            ],
+            'products' => [
+                ['id' => '1', 'name' => 'Widget', 'price' => '19.99', 'category' => 'tools'],
+                ['id' => '2', 'name' => 'Gadget', 'price' => '49.99', 'category' => 'electronics'],
+            ],
         ];
-
-        $index = ord($input[0] ?? "\0") % count($generators);
-        return $generators[$index];
+        foreach ($fixtureRows as $table => $rows) {
+            $store->set($table, $rows);
+        }
+        $parser = new SqliteParser();
+        $guard = new SqliteQueryGuard($parser);
+        $castRenderer = new SqliteCastRenderer();
+        $quoter = new SqliteIdentifierQuoter();
+        $selectTransformer = new SelectTransformer($castRenderer, $quoter);
+        $insertTransformer = new InsertTransformer($parser, $selectTransformer);
+        $updateTransformer = new UpdateTransformer($parser, $selectTransformer);
+        $deleteTransformer = new DeleteTransformer($parser, $selectTransformer);
+        $transformer = new SqliteTransformer($parser, $selectTransformer, $insertTransformer, $updateTransformer, $deleteTransformer);
+        $schemaParser = new SqliteSchemaParser();
+        $mutationResolver = new SqliteMutationResolver($store, $registry, $schemaParser, $parser);
+        $rewriter = new SqliteRewriter($guard, $store, $registry, $transformer, $mutationResolver, $parser);
+        RewriteCheck::verify(new SqliteQueryGuard(new SqliteParser()), $rewriter, $sql);
     }
 }

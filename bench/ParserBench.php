@@ -4,8 +4,12 @@ declare(strict_types=1);
 
 namespace Bench;
 
-use ZtdQuery\Platform\Sqlite\SqliteParser;
+use PhpBench\Attributes as Benchmark;
+use ZtdQuery\Platform\Sqlite\Sql\SqliteParser;
 
+/**
+ * Measures fixed parser workloads with construction outside the timed subjects.
+ */
 final class ParserBench
 {
     private SqliteParser $parser;
@@ -14,28 +18,33 @@ final class ParserBench
 
     private string $insertSql = "INSERT INTO users (id, name, email) VALUES (1, 'Alice', 'alice@example.com')";
 
+    /**
+     * Recreates dependencies before each benchmark iteration.
+     */
     public function setUp(): void
     {
         $this->parser = new SqliteParser();
     }
 
     /**
-     * @BeforeMethods({"setUp"})
-     * @Revs(250)
-     * @Iterations(5)
+     * Measures one operation over the fixed SQL fixture.
      */
-    public function benchClassifySelect(): void
+    #[Benchmark\BeforeMethods('setUp')]
+    #[Benchmark\Revs(250)]
+    public function benchClassifySelect(): ?string
     {
-        $this->parser->classifyStatement($this->selectSql);
+        return $this->parser->classifyStatement($this->selectSql);
     }
 
     /**
-     * @BeforeMethods({"setUp"})
-     * @Revs(250)
-     * @Iterations(5)
+     * Measures one operation over the fixed SQL fixture.
+     *
+     * @return list<string>
      */
-    public function benchSplitInsert(): void
+    #[Benchmark\BeforeMethods('setUp')]
+    #[Benchmark\Revs(250)]
+    public function benchSplitInsert(): array
     {
-        $this->parser->splitStatements($this->insertSql);
+        return $this->parser->splitStatements($this->insertSql);
     }
 }

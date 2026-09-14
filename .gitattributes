@@ -7,3 +7,9 @@ phpstan.neon        export-ignore
 phpunit.xml.dist    export-ignore
 /bench/             export-ignore
 /fuzz/              export-ignore
+.php-cs-fixer.dist.php   export-ignore
+deptrac.yaml             export-ignore
+loc.yaml                 export-ignore
+tree.yaml                export-ignore
+phpcs.xml.dist           export-ignore
+phpbench.json.dist       export-ignore

@@ -4,4 +4,9 @@
 .phpunit.cache
 .phpstan.cache/
 .php-cs-fixer.cache
-composer.lock
+/phpbench.json
+/.deptrac.cache
+/fuzz/corpus/
+/crash-*
+
+/fuzz/coverage/

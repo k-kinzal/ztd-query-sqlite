@@ -1,0 +1,108 @@
+# NOTE: You do not have permission to overwrite this file. Please ask a human operator to perform the changes for you.
+deptrac:
+  paths:
+    - ./src
+  analyser:
+    types:
+      - class
+      - use
+      - file
+  layers:
+    - name: Session
+      collectors:
+        - type: directory
+          value: src/SqliteSessionFactory.php$
+        - type: directory
+          value: src/Compatibility/.*
+    - name: Simulation
+      collectors:
+        - type: directory
+          value: src/Rewrite/.*
+        - type: directory
+          value: src/Shadow/.*
+        - type: classLike
+          value: ^ZtdQuery\\Platform\\Sqlite\\Rewrite\\FullText\\TableContext$
+    - name: Connection
+      collectors:
+        - type: directory
+          value: src/Connection/.*
+    - name: Schema
+      collectors:
+        - type: directory
+          value: src/Schema/.*
+    - name: Sql
+      collectors:
+        - type: directory
+          value: src/Sql/.*
+    - name: CoreSession
+      collectors:
+        - type: classLike
+          value: ^ZtdQuery\\(?:[^\\]+|Platform\\SessionFactory)$
+    - name: CoreSimulation
+      collectors:
+        - type: classLike
+          value: ^ZtdQuery\\(?:Rewrite|Shadow)\\
+    - name: CoreContract
+      collectors:
+        - type: classLike
+          value: ^ZtdQuery\\Platform\\(?!SessionFactory$)[^\\]+$
+    - name: CoreConnection
+      collectors:
+        - type: classLike
+          value: ^ZtdQuery\\Connection\\
+    - name: CoreSchema
+      collectors:
+        - type: classLike
+          value: ^ZtdQuery\\Schema\\
+    - name: CoreSql
+      collectors:
+        - type: classLike
+          value: ^ZtdQuery\\Sql\\
+    - name: CoreConfig
+      collectors:
+        - type: classLike
+          value: ^ZtdQuery\\Config\\
+    - name: CoreException
+      collectors:
+        - type: classLike
+          value: ^ZtdQuery\\Exception\\
+    - name: Composer
+      collectors:
+        - type: classLike
+          value: ^Composer\\Autoload\\
+  ruleset:
+    Session:
+      - Simulation
+      - Connection
+      - Schema
+      - Sql
+      - CoreSession
+      - CoreSimulation
+      - CoreConnection
+      - CoreSchema
+      - CoreConfig
+      - Composer
+    Simulation:
+      - Sql
+      - CoreSimulation
+      - CoreContract
+      - CoreSchema
+      - CoreSql
+      - CoreException
+    Connection:
+      - Schema
+      - Sql
+      - CoreSql
+      - CoreContract
+      - CoreConnection
+      - CoreSchema
+    Schema:
+      - Sql
+      - CoreContract
+      - CoreConnection
+      - CoreSchema
+      - CoreSql
+    Sql:
+      - CoreContract
+      - CoreSchema
+      - CoreSql

@@ -1,14 +1,11 @@
 <?php
-# NOTE: You do not have permission to overwrite this file. Please ask a human operator to perform the changes for you.
+/** NOTE: You do not have permission to overwrite this file. Please ask a human operator to perform the changes for you. */
 
 declare(strict_types=1);
 
 $finder = (new PhpCsFixer\Finder())
     ->in(__DIR__)
     ->exclude('build')
-    ->exclude('cache')
-    ->exclude('node_modules')
-    ->exclude('var')
     ->exclude('vendor');
 
 return (new PhpCsFixer\Config())

@@ -6,6 +6,14 @@ includes:
     - vendor/k-kinzal/php-ai-toolkit/rules.neon
 
 parameters:
+    toolkit:
+        visibilityExemptNamespacePrefixes:
+            - 'Tests'
+            - 'Bench'
+        forbiddenNamespacePrefixes:
+            - 'Tests\Fixture'
+            - 'Tests\Fixtures'
+    phpVersion: 80100
     level: max
     paths:
         - src

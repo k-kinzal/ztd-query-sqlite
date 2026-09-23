@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Fuzz\Semantics;
 
 use SqlFaker\Generation\Choice\BytePlanCompiler;
+use SqlFaker\Generation\Choice\PlanBuilder;
 use SqlFaker\SqliteProvider;
 
 /**
@@ -12,11 +13,14 @@ use SqlFaker\SqliteProvider;
  */
 final class CommandSequence
 {
+    private readonly PlanBuilder $planner;
+
     /**
      * Keeps the grammar planner outside the per-input reset boundary.
      */
     public function __construct(private readonly SqliteProvider $provider)
     {
+        $this->planner = $provider->planner();
     }
 
     /**
@@ -28,13 +32,13 @@ final class CommandSequence
     {
         $commands = [];
         $nextId = 3;
-        foreach (str_split(substr($input, 0, 128), 4) as $bytes) {
+        foreach (str_split(substr($input, 0, 1024), 32) as $bytes) {
             $operation = ord($bytes[0]) % 6;
             $id = $operation === 1 ? $nextId++ : ord($bytes[1] ?? "\0") % $nextId + 1;
             $value = ord($bytes[2] ?? "\0");
             $name = ["'Alice'", "'O''Brien'", "'\u{2603}'", "''"][ord($bytes[3] ?? "\0") % 4];
             $constraints = StatementPlans::operation($operation, $id, $value, $name);
-            $plan = (new BytePlanCompiler())->compile($bytes, $this->provider->planner(), $constraints);
+            $plan = (new BytePlanCompiler())->compile(substr($bytes, 4), $this->planner, $constraints);
             $commands[] = $this->provider->generate($plan);
         }
         return $commands;

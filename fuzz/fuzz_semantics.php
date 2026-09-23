@@ -15,5 +15,5 @@ $provider = new SqliteProvider(Factory::create(), 'sqlite-3.47.2', $coverage);
  * @var PhpFuzzer\Config $config
  */
 $config->setTarget(Closure::fromCallable(new SemanticsTarget(new CommandSequence($provider))));
-$config->setMaxLen(128);
+$config->setMaxLen(1024);
 $config->setAllowedExceptions([]);

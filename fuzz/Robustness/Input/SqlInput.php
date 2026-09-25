@@ -12,7 +12,7 @@ final class SqlInput
     /**
      * Pins the SQLite grammar and keeps its planning state outside the fuzz loop.
      */
-    public function __construct(private \SqlFaker\SqliteProvider $provider)
+    public function __construct(private \SqlFaker\Sqlite\SqliteProvider $provider)
     {
     }
 

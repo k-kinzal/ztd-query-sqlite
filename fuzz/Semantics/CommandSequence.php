@@ -6,7 +6,7 @@ namespace Fuzz\Semantics;
 
 use SqlFaker\Generation\Choice\BytePlanCompiler;
 use SqlFaker\Generation\Choice\PlanBuilder;
-use SqlFaker\SqliteProvider;
+use SqlFaker\Sqlite\SqliteProvider;
 
 /**
  * Compiles sequence bytes into frozen SQLFaker plans over a bounded SQLite fixture.

@@ -6,7 +6,7 @@ use Faker\Factory;
 use Fuzz\Semantics\CommandSequence;
 use Fuzz\Semantics\SemanticsTarget;
 use SqlFaker\Generation\Coverage\GrammarCoverage;
-use SqlFaker\SqliteProvider;
+use SqlFaker\Sqlite\SqliteProvider;
 
 $coverage = getenv('SQLFAKER_COVERAGE') === '0' ? null : new GrammarCoverage(__DIR__ . '/coverage/semantics');
 $provider = new SqliteProvider(Factory::create(), 'sqlite-3.47.2', $coverage);

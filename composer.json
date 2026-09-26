@@ -68,27 +68,21 @@
     "format": "php-cs-fixer fix --allow-risky=yes",
     "format:check": "php-cs-fixer fix --dry-run --diff --allow-risky=yes",
     "fuzz": "@fuzz:smoke",
-    "fuzz:robustness": "@fuzz:semantics",
-    "fuzz:robustness:classify": [
+    "fuzz:behavior": [
       "Composer\\Config::disableProcessTimeout",
-      "@php -r \"is_dir('fuzz/corpus/robustness-classify') || mkdir('fuzz/corpus/robustness-classify', 0777, true);\" --",
-      "php-fuzzer fuzz fuzz/fuzz_robustness_classify.php fuzz/corpus/robustness-classify/"
+      "@php -r \"is_dir('fuzz/corpus/behavior') || mkdir('fuzz/corpus/behavior', 0777, true);\" --",
+      "@php -d memory_limit=-1 vendor/bin/php-fuzzer fuzz fuzz/fuzz_behavior.php fuzz/corpus/behavior/ --timeout=60"
     ],
-    "fuzz:robustness:rewrite": [
+    "fuzz:fixtures": [
       "Composer\\Config::disableProcessTimeout",
-      "@php -r \"is_dir('fuzz/corpus/robustness-rewrite') || mkdir('fuzz/corpus/robustness-rewrite', 0777, true);\" --",
-      "php-fuzzer fuzz fuzz/fuzz_robustness_rewrite.php fuzz/corpus/robustness-rewrite/"
-    ],
-    "fuzz:semantics": [
-      "Composer\\Config::disableProcessTimeout",
-      "@php -r \"is_dir('fuzz/corpus/semantics') || mkdir('fuzz/corpus/semantics', 0777, true);\" --",
-      "php-fuzzer fuzz fuzz/fuzz_semantics.php fuzz/corpus/semantics/"
+      "@putenv ZTD_FUZZ_FIXTURES=1",
+      "@php -r \"is_dir('fuzz/corpus/fixtures') || mkdir('fuzz/corpus/fixtures', 0777, true);\" --",
+      "@php -d memory_limit=-1 vendor/bin/php-fuzzer fuzz fuzz/fuzz_behavior.php fuzz/corpus/fixtures/ --timeout=60"
     ],
     "fuzz:smoke": [
       "Composer\\Config::disableProcessTimeout",
-      "@fuzz:robustness:classify --max-runs=100",
-      "@fuzz:robustness:rewrite --max-runs=100",
-      "@fuzz:semantics --max-runs=100"
+      "@fuzz:behavior --max-runs=100",
+      "@fuzz:fixtures --max-runs=100"
     ],
     "lint": [
       "@autoload:check",
@@ -100,7 +94,7 @@
       "@deptrac"
     ],
     "loc-guard": "loc-guard --config=loc.yaml",
-    "phpstan": "phpstan analyse --memory-limit=512M",
+    "phpstan": "phpstan analyse --memory-limit=1G",
     "test": "paratest --processes=auto",
     "test:coverage": "@php -d memory_limit=1G vendor/bin/paratest --processes=auto --testsuite unit --coverage-xml build/coverage-xml --log-junit build/junit.xml",
     "test:unit": "phpunit --testsuite unit",

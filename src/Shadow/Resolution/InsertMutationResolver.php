@@ -61,6 +61,9 @@ final class InsertMutationResolver
             $tableName,
             $primaryKeys,
             $isIgnore,
+            tableDefinition: $definition,
+            sql: $sql,
+            validateConstraints: !$isIgnore,
             candidateKeys: $definition?->candidateKeys(),
         );
     }

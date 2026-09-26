@@ -242,4 +242,40 @@ final class InsertMutationResolverTest extends TestCase
         self::assertSame([['id' => 1, 'name' => 'Alice']], $store->get('users'));
     }
 
+    public function testPlainInsertRejectsDuplicateKeysAtomically(): void
+    {
+        $registry = new TableDefinitionRegistry();
+        $registry->register('users', new TableDefinition(['id', 'name'], ['id' => 'INTEGER', 'name' => 'TEXT'], ['id'], ['id', 'name'], []));
+        $store = new ShadowStore();
+        $before = [['id' => 1, 'name' => 'existing']];
+        $store->set('users', $before);
+        $sql = "INSERT INTO users (id, name) VALUES (2, 'new'), (1, 'duplicate')";
+        $resolver = new InsertMutationResolver(new SqliteParser(), $registry);
+        $mutation = $resolver->resolveInsert($sql);
+        $this->expectException(\ZtdQuery\Exception\DuplicateKeyException::class);
+        try {
+            $mutation->apply($store, [['id' => 2, 'name' => 'new'], ['id' => 1, 'name' => 'duplicate']]);
+        } finally {
+            self::assertSame($before, $store->get('users'));
+        }
+    }
+
+    public function testPlainInsertRejectsNullViolationsAtomically(): void
+    {
+        $registry = new TableDefinitionRegistry();
+        $registry->register('users', new TableDefinition(['id', 'name'], ['id' => 'INTEGER', 'name' => 'TEXT'], ['id'], ['id', 'name'], []));
+        $store = new ShadowStore();
+        $before = [['id' => 1, 'name' => 'existing']];
+        $store->set('users', $before);
+        $sql = "INSERT INTO users (id, name) VALUES (2, 'new'), (1, 'duplicate')";
+        $resolver = new InsertMutationResolver(new SqliteParser(), $registry);
+        $mutation = $resolver->resolveInsert($sql);
+        $this->expectException(\ZtdQuery\Exception\NotNullViolationException::class);
+        try {
+            $mutation->apply($store, [['id' => 2, 'name' => 'new'], ['id' => 3, 'name' => null]]);
+        } finally {
+            self::assertSame($before, $store->get('users'));
+        }
+    }
+
 }

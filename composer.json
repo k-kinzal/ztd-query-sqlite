@@ -3,6 +3,10 @@
   "description": "SQLite platform support for ZTD Query",
   "type": "library",
   "license": "MIT",
+  "support": {
+    "source": "https://github.com/k-kinzal/ztd-query-php/tree/main/packages/ztd-query-sqlite",
+    "docs": "https://k-kinzal.github.io/ztd-query-php/k-kinzal/ztd-query-sqlite/"
+  },
   "require": {
     "php": "^8.1",
     "k-kinzal/ztd-query-core": "dev-main"
@@ -102,6 +106,30 @@
     "test:unit": "phpunit --testsuite unit",
     "tree-guard": "tree-guard --config=tree.yaml"
   },
+  "scripts-descriptions": {
+    "autoload:check": "Check that the PSR-4 autoload mapping is strict and unambiguous.",
+    "bench": "Run the benchmarks.",
+    "bench:full": "Run the benchmarks.",
+    "bench:quick": "Run the benchmarks with fewer iterations.",
+    "compat": "Check compatibility with PHP 8.1 and later with PHP_CodeSniffer.",
+    "deptrac": "Check the layer dependencies with Deptrac.",
+    "docgen": "Generate the API documentation into build/docs.",
+    "docgen:diff": "Generate the API documentation marked with the changes against origin/main, and serve it.",
+    "docgen:fresh": "Generate the API documentation without the cache.",
+    "docgen:serve": "Generate the API documentation and serve it locally.",
+    "doctest": "Run the @example blocks of the PHPDoc as tests.",
+    "format": "Fix the code style with PHP-CS-Fixer.",
+    "format:check": "Check the code style with PHP-CS-Fixer without changing files.",
+    "fuzz": "Run every fuzz target with the bounded smoke budget.",
+    "fuzz:smoke": "Run each fuzz target for up to 100 executions; individual fuzz:* commands run continuously.",
+    "lint": "Run every static check: autoload, formatting, PHPStan, PHP compatibility, size and tree guards, and layer dependencies.",
+    "loc-guard": "Check file size limits.",
+    "phpstan": "Run PHPStan.",
+    "test": "Run all test suites in parallel.",
+    "test:coverage": "Run the unit tests in parallel and write the coverage and JUnit reports to build/.",
+    "test:unit": "Run the unit tests.",
+    "tree-guard": "Check the directory structure rules."
+  },
   "config": {
     "allow-plugins": {
       "dealerdirect/phpcodesniffer-composer-installer": true
@@ -110,13 +138,5 @@
       "php": "8.1.0"
     },
     "sort-packages": true
-  },
-  "support": {
-    "source": "https://github.com/k-kinzal/ztd-query-php/tree/main/packages/ztd-query-sqlite",
-    "docs": "https://k-kinzal.github.io/ztd-query-php/k-kinzal/ztd-query-sqlite/"
-  },
-  "scripts-descriptions": {
-    "fuzz": "Run every fuzz target with the bounded smoke budget.",
-    "fuzz:smoke": "Run each fuzz target for up to 100 executions; individual fuzz:* commands run continuously."
   }
 }

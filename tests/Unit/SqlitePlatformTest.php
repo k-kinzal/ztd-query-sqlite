@@ -27,9 +27,9 @@ use ZtdQuery\Platform\Sqlite\Sql\SqliteIdentifierQuoter;
 use ZtdQuery\Platform\Sqlite\Sql\SqliteLexicalMasker;
 use ZtdQuery\Platform\Sqlite\Sql\SqliteParser;
 use ZtdQuery\Platform\Sqlite\Sql\Value\SqliteCastRenderer;
-use ZtdQuery\Platform\Sqlite\SqliteSessionFactory;
+use ZtdQuery\Platform\Sqlite\SqlitePlatform;
 
-#[CoversClass(SqliteSessionFactory::class)]
+#[CoversClass(SqlitePlatform::class)]
 #[UsesClass(\ZtdQuery\Platform\Sqlite\Connection\Parameter\ParameterReplacements::class)]
 #[UsesClass(\ZtdQuery\Platform\Sqlite\Shadow\Mutation\Table\AlterTableMutation::class)]
 #[UsesClass(\ZtdQuery\Platform\Sqlite\Shadow\Mutation\Table\Alter\AddColumnResolver::class)]
@@ -125,9 +125,9 @@ use ZtdQuery\Platform\Sqlite\SqliteSessionFactory;
 #[UsesClass(\ZtdQuery\Platform\Sqlite\Rewrite\Transformer\Select\ShadowCteRenderer::class)]
 #[UsesClass(SqliteTransformer::class)]
 #[UsesClass(UpdateTransformer::class)]
-final class SqliteSessionFactoryTest extends TestCase
+final class SqlitePlatformTest extends TestCase
 {
-    public function testCreateRegistersReflectedViews(): void
+    public function testReflectViewsRegistersReflectedViews(): void
     {
         $empty = self::createStub(StatementInterface::class);
         $empty->method('fetchAll')->willReturn([]);
@@ -140,15 +140,15 @@ final class SqliteSessionFactoryTest extends TestCase
             static fn (string $sql): StatementInterface => str_contains($sql, "type='view'") ? $views : $empty,
         );
 
-        $session = (new SqliteSessionFactory())->create($connection, ZtdConfig::default());
+        $executor = new \ZtdQuery\QueryExecutor($connection, new SqlitePlatform(), ZtdConfig::default());
 
         self::assertSame(
             "WITH \"active_users\" AS (SELECT 1 AS id)\nSELECT * FROM active_users",
-            $session->rewrite('SELECT * FROM active_users')->sql(),
+            $executor->rewrite('SELECT * FROM active_users')->sql(),
         );
     }
 
-    public function testCreateReturnsSession(): void
+    public function testCreateRewriterProvidesIndependentSqlBehavior(): void
     {
         $statement = static::createStub(StatementInterface::class);
         $statement->method('fetchAll')->willReturn([]);
@@ -157,15 +157,15 @@ final class SqliteSessionFactoryTest extends TestCase
         $connection->method('query')->willReturn($statement);
 
         $config = new ZtdConfig();
-        $factory = new SqliteSessionFactory();
-        $session = $factory->create($connection, $config);
+        $platform = new SqlitePlatform();
+        $executor = new \ZtdQuery\QueryExecutor($connection, $platform, $config);
 
-        self::assertTrue($session->isEnabled());
-        self::assertInstanceOf(SqlitePdoParameterBindingCompiler::class, $session->parameterBindingCompiler());
-        self::assertInstanceOf(SqlitePdoResultColumnTypeResolver::class, $session->resultColumnTypeResolver());
+        self::assertTrue($executor->session()->isEnabled());
+        self::assertInstanceOf(SqlitePdoParameterBindingCompiler::class, $executor->platform()->parameterBindingCompiler());
+        self::assertInstanceOf(SqlitePdoResultColumnTypeResolver::class, $executor->platform()->resultColumnTypeResolver());
     }
 
-    public function testCreateWithExistingTablesRegistersDefinitions(): void
+    public function testReflectSchemaWithExistingTablesRegistersDefinitions(): void
     {
         $statement = static::createStub(StatementInterface::class);
         $statement->method('fetchAll')->willReturn([
@@ -176,12 +176,12 @@ final class SqliteSessionFactoryTest extends TestCase
         $connection->method('query')->willReturn($statement);
 
         $config = new ZtdConfig();
-        $factory = new SqliteSessionFactory();
-        $session = $factory->create($connection, $config);
+        $platform = new SqlitePlatform();
+        $executor = new \ZtdQuery\QueryExecutor($connection, $platform, $config);
 
-        self::assertTrue($session->isEnabled());
+        self::assertTrue($executor->session()->isEnabled());
 
-        $plan = $session->rewrite('SELECT * FROM users');
+        $plan = $executor->rewrite('SELECT * FROM users');
         self::assertStringContainsString('WITH', $plan->sql());
     }
 
@@ -197,9 +197,24 @@ final class SqliteSessionFactoryTest extends TestCase
         $connection->method('query')->willReturn($statement);
 
         $config = new ZtdConfig();
-        $factory = new SqliteSessionFactory();
-        $session = $factory->create($connection, $config);
+        $platform = new SqlitePlatform();
+        $executor = new \ZtdQuery\QueryExecutor($connection, $platform, $config);
 
-        self::assertTrue($session->isEnabled());
+        self::assertTrue($executor->session()->isEnabled());
+    }
+
+    public function testCopySupportDescribesTheDialect(): void
+    {
+        self::assertNull((new SqlitePlatform())->copySupport());
+    }
+
+    public function testParameterBindingCompilerDescribesTheDialect(): void
+    {
+        self::assertInstanceOf(SqlitePdoParameterBindingCompiler::class, (new SqlitePlatform())->parameterBindingCompiler());
+    }
+
+    public function testResultColumnTypeResolverDescribesTheDialect(): void
+    {
+        self::assertInstanceOf(SqlitePdoResultColumnTypeResolver::class, (new SqlitePlatform())->resultColumnTypeResolver());
     }
 }
